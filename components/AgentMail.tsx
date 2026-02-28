@@ -546,7 +546,7 @@ export default function AgentMail() {
             <div className="space-y-4">
               <div>
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Quel professionnel de santé ?</h2>
-                <p className="text-sm text-zinc-500">Recherche par nom, prénom ou email dans HubSpot.</p>
+                <p className="text-sm text-zinc-500">Recherche par nom ou email dans HubSpot.</p>
               </div>
 
               <div className="relative">
