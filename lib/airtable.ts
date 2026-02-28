@@ -91,25 +91,60 @@ export async function getFormationsActives(): Promise<Formation[]> {
 }
 
 export async function getSessionsByFormation(formationRecordId: string): Promise<Session[]> {
-  // Filter sessions where linked Numéro d'action DPC contains this record ID
-  const formula = encodeURIComponent(
-    `AND(FIND("${formationRecordId}", ARRAYJOIN({Numéro d'action DPC}, ",")), IS_AFTER({Date de début de session}, TODAY()))`
-  )
-  const data = await at(
-    `/${TABLES.sessions}?filterByFormula=${formula}&fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent('Numéro de session')}&fields[]=${encodeURIComponent('Date de début de session')}&fields[]=${encodeURIComponent('Date de fin de session')}&fields[]=${encodeURIComponent('Date 1ère soirée CV / Date Présentiel')}&fields[]=${encodeURIComponent('Date 2ème soirée CV')}&fields[]=${encodeURIComponent('Date limite d\'inscription')}&fields[]=${encodeURIComponent('Temps lisible (Webflow)')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
-  )
-  return data.records.map((r: any) => ({
-    id: r.id,
-    session_id: r.fields['session_id'] || '',
-    numero: r.fields['Numéro de session'] || '',
-    date_debut: r.fields['Date de début de session'] || '',
-    date_fin: r.fields['Date de fin de session'] || '',
-    date_cv1: r.fields["Date 1ère soirée CV / Date Présentiel"] || '',
-    date_cv2: r.fields['Date 2ème soirée CV'] || '',
-    date_limite: r.fields["Date limite d'inscription"] || '',
-    temps_lisible: r.fields['Temps lisible (Webflow)'] || '',
-    formation_id: formationRecordId,
-  }))
+  // Fetch all sessions with pagination, filter client-side
+  // Reason: ARRAYJOIN on linked record fields returns primary field values (not record IDs),
+  // so FIND("recXXX", ...) never matches in Airtable formulas.
+  const fields = [
+    encodeURIComponent('session_id'),
+    encodeURIComponent('Numéro de session'),
+    encodeURIComponent('Date de début de session'),
+    encodeURIComponent('Date de fin de session'),
+    encodeURIComponent("Date 1ère soirée CV / Date Présentiel"),
+    encodeURIComponent('Date 2ème soirée CV'),
+    encodeURIComponent("Date limite d'inscription"),
+    encodeURIComponent('Temps lisible (Webflow)'),
+    encodeURIComponent("Numéro d'action DPC"),
+  ].map(f => `fields[]=${f}`).join('&')
+
+  const sort = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
+
+  // Paginate through all records
+  const allRecords: any[] = []
+  let offset: string | undefined
+
+  do {
+    const offsetParam = offset ? `&offset=${offset}` : ''
+    const data = await at(`/${TABLES.sessions}?${fields}&${sort}${offsetParam}`)
+    allRecords.push(...(data.records || []))
+    offset = data.offset
+  } while (offset)
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  return allRecords
+    .filter((r: any) => {
+      // The linked field returns an array of record IDs in the API response
+      const linkedFormations: string[] = r.fields["Numéro d'action DPC"] || []
+      if (!linkedFormations.includes(formationRecordId)) return false
+
+      // Filter future sessions only (skip if no date)
+      const dateDebut = r.fields['Date de début de session']
+      if (!dateDebut) return true // include if no date set
+      return new Date(dateDebut) >= today
+    })
+    .map((r: any) => ({
+      id: r.id,
+      session_id: r.fields['session_id'] || '',
+      numero: r.fields['Numéro de session'] || '',
+      date_debut: r.fields['Date de début de session'] || '',
+      date_fin: r.fields['Date de fin de session'] || '',
+      date_cv1: r.fields["Date 1ère soirée CV / Date Présentiel"] || '',
+      date_cv2: r.fields['Date 2ème soirée CV'] || '',
+      date_limite: r.fields["Date limite d'inscription"] || '',
+      temps_lisible: r.fields['Temps lisible (Webflow)'] || '',
+      formation_id: formationRecordId,
+    }))
 }
 
 export async function getFormationsParPublic(publicConcerne: string[]): Promise<Formation[]> {
