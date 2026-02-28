@@ -63,6 +63,8 @@ Quand le scope est disponible :
 2. Ajouter les enregistrements DNS
 3. Copier la clé API dans RESEND_API_KEY
 
+
+
 ---
 
 ## Slack Bot (relances J+3)
