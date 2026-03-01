@@ -89,6 +89,31 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
       })
     }
 
+    // If 2 words typed, try combined firstname+lastname searches (both orders)
+    if (parts.length === 2) {
+      const [a, b] = parts
+      // "dethie faye" → firstname=dethie AND lastname=faye
+      await runSearch({
+        filterGroups: [
+          {
+            filters: [
+              { propertyName: 'firstname', operator: 'CONTAINS_TOKEN', value: a },
+              { propertyName: 'lastname', operator: 'CONTAINS_TOKEN', value: b },
+            ],
+          },
+          // reversed: "faye dethie" case
+          {
+            filters: [
+              { propertyName: 'firstname', operator: 'CONTAINS_TOKEN', value: b },
+              { propertyName: 'lastname', operator: 'CONTAINS_TOKEN', value: a },
+            ],
+          },
+        ],
+        properties: baseProps,
+        limit: 25,
+      })
+    }
+
     // Also search each word part individually via filterGroups (OR across firstname + lastname)
     // This catches cases where full-text doesn't tokenize the same way
     if (parts.length > 0) {
