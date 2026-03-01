@@ -147,6 +147,63 @@ export async function getSessionsByFormation(formationRecordId: string): Promise
     }))
 }
 
+export async function getFormationsDejaFaites(rpps: string, email: string): Promise<string[]> {
+  // Returns formation record IDs already completed by this PS
+  // Chain: PS (RPPS/email) → Client record → Inscriptions → Sessions → Formation IDs
+  if (!rpps && !email) return []
+
+  let clientRecordId: string | null = null
+
+  if (rpps) {
+    try {
+      const formula = encodeURIComponent(`{RPPS}="${rpps}"`)
+      const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`)
+      if (data.records?.length) clientRecordId = data.records[0].id
+    } catch { /* ignore */ }
+  }
+
+  if (!clientRecordId && email) {
+    try {
+      const formula = encodeURIComponent(`{email}="${email}"`)
+      const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`)
+      if (data.records?.length) clientRecordId = data.records[0].id
+    } catch { /* ignore */ }
+  }
+
+  if (!clientRecordId) return []
+
+  // Get inscriptions linked to this client
+  const inscFormula = encodeURIComponent(`FIND("${clientRecordId}", ARRAYJOIN({RPPS}, ","))`)
+  const inscData = await at(
+    `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
+  )
+
+  const inscriptions = inscData.records || []
+  if (!inscriptions.length) return []
+
+  // Extract session record IDs from the linked field (returns array of record IDs)
+  const sessionRecordIds: string[] = inscriptions
+    .flatMap((r: any) => r.fields['session_id'] || [])
+    .filter(Boolean)
+
+  if (!sessionRecordIds.length) return []
+
+  // Get formation IDs from those sessions
+  const orConditions = sessionRecordIds
+    .slice(0, 20)
+    .map((id) => `RECORD_ID()="${id}"`)
+    .join(',')
+  const sessionsData = await at(
+    `/${TABLES.sessions}?filterByFormula=${encodeURIComponent(`OR(${orConditions})`)}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
+  )
+
+  const formationIds: string[] = (sessionsData.records || [])
+    .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+    .filter(Boolean)
+
+  return Array.from(new Set(formationIds))
+}
+
 export async function getFormationsParPublic(publicConcerne: string[]): Promise<Formation[]> {
   if (!publicConcerne.length) return []
   // Get formations with overlapping public concerné

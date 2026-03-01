@@ -6,7 +6,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 interface Commercial { id: string; hubspot_id: string; name: string; email: string; slack_user_id: string }
 interface Formation { id: string; nom: string; numero: string; format: string; public: string[] }
 interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string }
-interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string }
+interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6
 
@@ -296,6 +296,8 @@ export default function AgentMail() {
             nom: psContact.lastname,
             prenom: psContact.firstname,
             specialite: psContact.specialite,
+            email: psContact.email,
+            rpps: psContact.rpps || '',
           },
         }),
       })
@@ -546,7 +548,7 @@ export default function AgentMail() {
             <div className="space-y-4">
               <div>
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Quel professionnel de santé ?</h2>
-                <p className="text-sm text-zinc-500">Recherche par nom ou email dans HubSpot.</p>
+                <p className="text-sm text-zinc-500">Recherche par nom, prénom ou email dans HubSpot.</p>
               </div>
 
               <div className="relative">

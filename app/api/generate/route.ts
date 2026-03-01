@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { generateMail } from '@/lib/claude'
-import { getFormationsParPublic } from '@/lib/airtable'
+import { getFormationsParPublic, getFormationsDejaFaites } from '@/lib/airtable'
 
 export async function POST(req: NextRequest) {
   try {
@@ -15,10 +15,14 @@ export async function POST(req: NextRequest) {
     let formationsLiees: Array<{ nom: string; format: string }> = []
     try {
       if (formation.public?.length) {
+        // Get formations already completed by this PS to exclude them
+        const dejaFaites = await getFormationsDejaFaites(ps.rpps || '', ps.email || '')
+
         const liees = await getFormationsParPublic(formation.public)
         formationsLiees = liees
-          .filter((f) => f.id !== formation.id) // exclude current
-          .slice(0, 3) // max 3 upsell
+          .filter((f) => f.id !== formation.id) // exclude current formation
+          .filter((f) => !dejaFaites.includes(f.id)) // exclude already done
+          .slice(0, 3)
           .map((f) => ({ nom: f.nom, format: f.format }))
       }
     } catch {
