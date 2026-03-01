@@ -74,6 +74,7 @@ STYLE :
 - Une phrase sur la prise en charge ANDPC
 - Invitation à revenir vers le commercial
 - Signature complète
+- N'oublie pas de dire Bonjour,
 
 Réponds UNIQUEMENT avec un JSON valide dans ce format exact :
 {
