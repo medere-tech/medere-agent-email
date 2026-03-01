@@ -149,59 +149,76 @@ export async function getSessionsByFormation(formationRecordId: string): Promise
 
 export async function getFormationsDejaFaites(rpps: string, email: string): Promise<string[]> {
   // Returns formation record IDs already completed by this PS
-  // Chain: PS (RPPS/email) → Client record → Inscriptions → Sessions → Formation IDs
+  // Strategy: query Inscriptions directly using RPPS text value (primary field of Clients)
+  // Airtable ARRAYJOIN on linked fields returns primary field values (not record IDs)
   if (!rpps && !email) return []
 
-  let clientRecordId: string | null = null
+  try {
+    // Step 1: find the RPPS text value to use as filter
+    // If we have it from HubSpot, use it directly
+    // Otherwise, look up the client by email to get their RPPS
+    let rppsValue = rpps
 
-  if (rpps) {
-    try {
-      const formula = encodeURIComponent(`{RPPS}="${rpps}"`)
-      const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`)
-      if (data.records?.length) clientRecordId = data.records[0].id
-    } catch { /* ignore */ }
-  }
-
-  if (!clientRecordId && email) {
-    try {
+    if (!rppsValue && email) {
       const formula = encodeURIComponent(`{email}="${email}"`)
       const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`)
-      if (data.records?.length) clientRecordId = data.records[0].id
-    } catch { /* ignore */ }
+      if (data.records?.length) {
+        rppsValue = data.records[0].fields['RPPS'] || ''
+      }
+    }
+
+    if (!rppsValue) return []
+
+    // Step 2: get all inscriptions for this PS using RPPS text value
+    // ARRAYJOIN({RPPS}) in Inscriptions returns the RPPS number (primary field of Clients)
+    const inscFormula = encodeURIComponent(`FIND("${rppsValue}", ARRAYJOIN({RPPS}, ","))`)
+    const inscData = await at(
+      `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
+    )
+
+    const inscriptions = inscData.records || []
+    if (!inscriptions.length) return []
+
+    // Step 3: get session_id text values from inscriptions
+    // session_id in Inscriptions is a linked field to Sessions
+    // ARRAYJOIN returns the primary field of Sessions (the session_id text like "2025-001")
+    // We need to fetch sessions by those text values
+    const sessionIds: string[] = inscriptions
+      .flatMap((r: any) => r.fields['session_id'] || [])
+      .filter(Boolean)
+
+    if (!sessionIds.length) return []
+
+    // Step 4: fetch all sessions and filter client-side by session_id text
+    // (same approach as getSessionsByFormation — avoids FIND on linked record IDs)
+    const allSessions: any[] = []
+    let offset: string | undefined
+    do {
+      const offsetParam = offset ? `&offset=${offset}` : ''
+      const data = await at(
+        `/${TABLES.sessions}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}${offsetParam}`
+      )
+      allSessions.push(...(data.records || []))
+      offset = data.offset
+    } while (offset)
+
+    // Step 5: collect formation record IDs from matching sessions
+    // The linked field "Numéro d'action DPC" in Sessions returns formation record IDs
+    const formationIds: string[] = allSessions
+      .filter((r: any) => {
+        const sid = r.fields['session_id']
+        // session_id in Sessions is a text field — direct match
+        return sid && sessionIds.includes(sid)
+      })
+      .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+      .filter(Boolean)
+
+    return Array.from(new Set(formationIds))
+  } catch (e) {
+    // Non-blocking — if this fails, upsell still shows (better than nothing)
+    console.error('getFormationsDejaFaites error:', e)
+    return []
   }
-
-  if (!clientRecordId) return []
-
-  // Get inscriptions linked to this client
-  const inscFormula = encodeURIComponent(`FIND("${clientRecordId}", ARRAYJOIN({RPPS}, ","))`)
-  const inscData = await at(
-    `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
-  )
-
-  const inscriptions = inscData.records || []
-  if (!inscriptions.length) return []
-
-  // Extract session record IDs from the linked field (returns array of record IDs)
-  const sessionRecordIds: string[] = inscriptions
-    .flatMap((r: any) => r.fields['session_id'] || [])
-    .filter(Boolean)
-
-  if (!sessionRecordIds.length) return []
-
-  // Get formation IDs from those sessions
-  const orConditions = sessionRecordIds
-    .slice(0, 20)
-    .map((id) => `RECORD_ID()="${id}"`)
-    .join(',')
-  const sessionsData = await at(
-    `/${TABLES.sessions}?filterByFormula=${encodeURIComponent(`OR(${orConditions})`)}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
-  )
-
-  const formationIds: string[] = (sessionsData.records || [])
-    .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
-    .filter(Boolean)
-
-  return Array.from(new Set(formationIds))
 }
 
 export async function getFormationsParPublic(publicConcerne: string[]): Promise<Formation[]> {
