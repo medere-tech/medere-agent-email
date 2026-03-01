@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { generateMail } from '@/lib/claude'
-import { getFormationsParPublic, getFormationsDejaFaites } from '@/lib/airtable'
+import { getFormationsUpsell, getFormationsDejaFaites } from '@/lib/airtable'
 
 export async function POST(req: NextRequest) {
   try {
@@ -11,27 +11,29 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Données manquantes' }, { status: 400 })
     }
 
-    // Fetch related formations for upsell (same public cible)
-    let formationsLiees: Array<{ nom: string; format: string }> = []
+    // Upsell intelligent : formations actives, même public, session disponible juste après
+    let formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string }> = []
     try {
       if (formation.public?.length) {
+        // Date de fin la plus tardive des sessions sélectionnées par le PS
+        const dateFinMax = sessions
+          .map((s: any) => s.date_fin || s.date_cv1 || '')
+          .filter(Boolean)
+          .sort()
+          .at(-1) || new Date().toISOString().slice(0, 10)
+
         const dejaFaites = await getFormationsDejaFaites(ps.rpps || '', ps.email || '')
-        console.log('[UPSELL] dejaFaites IDs:', dejaFaites)
 
-        const liees = await getFormationsParPublic(formation.public)
-        console.log('[UPSELL] Formations candidates (même public):', liees.map((f: any) => ({ id: f.id, nom: f.nom })))
-
-        formationsLiees = liees
-          .filter((f: any) => f.id !== formation.id)
-          .filter((f: any) => !dejaFaites.includes(f.id))
-          .slice(0, 3)
-          .map((f: any) => ({ nom: f.nom, format: f.format }))
-
-        console.log('[UPSELL] Formations retenues après filtrage:', formationsLiees)
+        formationsLiees = await getFormationsUpsell(
+          formation.id,
+          formation.public,
+          dateFinMax,
+          dejaFaites
+        )
       }
     } catch (e) {
-      console.error('[UPSELL] Erreur dans le bloc upsell:', e)
-      // Non-blocking - upsell is optional
+      console.error('[UPSELL] Erreur:', e)
+      // Non-blocking
     }
 
     const result = await generateMail({

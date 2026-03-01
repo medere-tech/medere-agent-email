@@ -236,9 +236,115 @@ export async function getFormationsDejaFaites(rpps: string, email: string): Prom
   }
 }
 
+export interface FormationUpsell {
+  nom: string
+  format: string
+  prochaineSession: string // date lisible ex: "12 mai 2025"
+}
+
+export async function getFormationsUpsell(
+  formationIdCourante: string,
+  publicConcerne: string[],
+  dateFinSessionsPS: string, // ISO date "YYYY-MM-DD" — date de fin de la dernière session sélectionnée
+  dejaFaites: string[]       // formation record IDs à exclure
+): Promise<FormationUpsell[]> {
+  if (!publicConcerne.length) return []
+
+  // ── Étape 1 : charger les formations actives du même public ──────────────
+  const orConditions = publicConcerne
+    .map((p) => `FIND("${p}", ARRAYJOIN({Public concerné}, ","))`)
+    .join(',')
+  const formulaFormations = encodeURIComponent(
+    `AND({Statut de la formation}="Active", OR(${orConditions}))`
+  )
+  const formationsData = await at(
+    `/${TABLES.formations}?filterByFormula=${formulaFormations}` +
+    `&fields[]=${encodeURIComponent('Nom de la formation')}` +
+    `&fields[]=${encodeURIComponent("Numéro d'action DPC")}` +
+    `&fields[]=${encodeURIComponent('Format')}` +
+    `&fields[]=${encodeURIComponent('Public concerné')}`
+  )
+
+  // Map rapide formation_id → metadata
+  const formationsMap = new Map<string, { nom: string; format: string }>()
+  for (const r of formationsData.records || []) {
+    formationsMap.set(r.id, {
+      nom: r.fields['Nom de la formation'] || '',
+      format: r.fields['Format'] || '',
+    })
+  }
+
+  // Construire le set des IDs éligibles (actives, même public, pas courante, pas déjà faites)
+  const allFormationIds = Array.from(formationsMap.keys())
+  const eligibles = new Set(
+    allFormationIds.filter(
+      (id: string) => id !== formationIdCourante && !dejaFaites.includes(id)
+    )
+  )
+
+  if (!eligibles.size) return []
+
+  // ── Étape 2 : charger toutes les sessions qui démarrent APRÈS la fin des sessions du PS ──
+  // On ne charge que les sessions futures pertinentes — gain de performance vs charger 1063 sessions
+  const formulaSessions = encodeURIComponent(
+    `IS_AFTER({Date de début de session}, "${dateFinSessionsPS}")`
+  )
+  const sortParam = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
+  const sessionFields = [
+    `fields[]=${encodeURIComponent('Date de début de session')}`,
+    `fields[]=${encodeURIComponent("Numéro d'action DPC")}`,
+  ].join('&')
+
+  const futureSessions: any[] = []
+  let offset: string | undefined
+  do {
+    const offsetParam = offset ? `&offset=${offset}` : ''
+    const data = await at(
+      `/${TABLES.sessions}?filterByFormula=${formulaSessions}&${sessionFields}&${sortParam}${offsetParam}`
+    )
+    futureSessions.push(...(data.records || []))
+    offset = data.offset
+  } while (offset)
+
+  // ── Étape 3 : pour chaque formation éligible, trouver la prochaine session disponible ──
+  // Map<formationId, prochaine_date_ISO>
+  const prochaineSessionMap = new Map<string, string>()
+
+  for (const session of futureSessions) {
+    const formationIds: string[] = session.fields["Numéro d'action DPC"] || []
+    const dateDebut: string = session.fields['Date de début de session'] || ''
+    if (!dateDebut) continue
+
+    for (const fid of formationIds) {
+      if (!eligibles.has(fid)) continue
+      // Les sessions sont triées ASC → la première date trouvée pour chaque formation est la plus proche
+      if (!prochaineSessionMap.has(fid)) {
+        prochaineSessionMap.set(fid, dateDebut)
+      }
+    }
+  }
+
+  // ── Étape 4 : trier par proximité et retourner top 3 ──────────────────────
+  const candidates = Array.from(prochaineSessionMap.entries())
+    .sort((a, b) => new Date(a[1]).getTime() - new Date(b[1]).getTime())
+    .slice(0, 3)
+    .map(([fid, dateISO]) => {
+      const meta = formationsMap.get(fid)!
+      const date = new Date(dateISO)
+      const prochaineSession = date.toLocaleDateString('fr-FR', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+      })
+      return { nom: meta.nom, format: meta.format, prochaineSession }
+    })
+
+  return candidates
+}
+
+// Kept for backward compatibility — not used in upsell anymore
 export async function getFormationsParPublic(publicConcerne: string[]): Promise<Formation[]> {
   if (!publicConcerne.length) return []
-  // Get formations with overlapping public concerné
   const orConditions = publicConcerne
     .map((p) => `FIND("${p}", ARRAYJOIN({Public concerné}, ","))`)
     .join(',')
