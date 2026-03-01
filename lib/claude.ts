@@ -22,8 +22,8 @@ export async function generateMail(params: GenerateMailParams): Promise<{ sujet:
   const sessionsText = sessions
     .map((s) => {
       const parts = [`Session ${s.numero}`]
-      if (s.temps_lisible) parts.push(`— ${s.temps_lisible}`)
-      else if (s.date_cv1) parts.push(`— ${formatDate(s.date_cv1)}`)
+      if (s.temps_lisible) parts.push(`- ${s.temps_lisible}`)
+      else if (s.date_cv1) parts.push(`- ${formatDate(s.date_cv1)}`)
       if (s.date_cv2) parts.push(`/ 2ème soirée : ${formatDate(s.date_cv2)}`)
       return parts.join(' ')
     })
@@ -31,7 +31,7 @@ export async function generateMail(params: GenerateMailParams): Promise<{ sujet:
 
   const upsellText =
     formationsLiees.length > 0
-      ? `\n\nJ'en profite également pour vous partager d'autres formations susceptibles de vous intéresser, dès que vous aurez terminé cette formation :\n${formationsLiees.map((f) => `• ${f.nom} (${f.format})${f.prochaineSession ? ` — prochaine session disponible le ${f.prochaineSession}` : ''}`).join('\n')}`
+      ? `\n\nJ'en profite également pour vous partager d'autres formations susceptibles de vous intéresser, dès que vous aurez terminé cette formation :\n${formationsLiees.map((f) => `• ${f.nom} (${f.format})${f.prochaineSession ? ` - prochaine session disponible le ${f.prochaineSession}` : ''}`).join('\n')}`
       : ''
 
   const prompt = `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.
@@ -39,7 +39,7 @@ Tu dois rédiger un email professionnel, chaleureux et clair pour un professionn
 
 CONTEXTE :
 - Commercial : ${commercial.name} (${commercial.email})
-- PS : ${ps.titre} ${ps.prenom} ${ps.nom}${ps.specialite ? ` — ${ps.specialite}` : ''}
+- PS : ${ps.titre} ${ps.prenom} ${ps.nom}${ps.specialite ? ` - ${ps.specialite}` : ''}
 - Formation souhaitée : "${formation.nom}"
 - Numéro d'action DPC : ${formation.numero}
 - Format : ${formation.format}
