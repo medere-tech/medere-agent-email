@@ -26,36 +26,85 @@ export interface HSContact {
   rpps?: string
 }
 
+// Normalize accents: "Eléonore" → "eleonore", "DUPRÉ" → "dupre"
+function normalizeQuery(str: string): string {
+  return str
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // strip diacritics
+    .toLowerCase()
+    .trim()
+}
+
 export async function searchContacts(query: string): Promise<HSContact[]> {
-  // Search by email OR name
+  if (!query || query.trim().length < 2) return []
+
   const isEmail = query.includes('@')
-  const isNumeric = /^\d+$/.test(query)
+  const isNumeric = /^\d+$/.test(query.trim())
+  const normalized = normalizeQuery(query)
+  const parts = normalized.split(/\s+/).filter(Boolean)
 
-  const filters = isEmail
-    ? [{ propertyName: 'email', operator: 'CONTAINS_TOKEN', value: query }]
-    : isNumeric
-    ? [{ propertyName: 'hs_additional_emails', operator: 'CONTAINS_TOKEN', value: query }]
-    : [
-        {
-          propertyName: 'lastname',
-          operator: 'CONTAINS_TOKEN',
-          value: query.split(' ')[0],
-        },
-      ]
+  const allResults: Map<string, any> = new Map()
 
-  const body = {
-    filterGroups: [{ filters }],
-    properties: ['firstname', 'lastname', 'email', 'specialite', 'jobtitle', 'hs_object_id'],
-    limit: 10,
+  // Helper to run one search and merge results
+  const runSearch = async (body: object) => {
+    try {
+      const res = await hs('/crm/v3/objects/contacts/search', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+      for (const r of res.results || []) {
+        if (!allResults.has(r.id)) allResults.set(r.id, r)
+      }
+    } catch { /* ignore partial failures */ }
   }
 
-  // Also try a fulltext search approach
-  const res = await hs('/crm/v3/objects/contacts/search', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
+  const baseProps = ['firstname', 'lastname', 'email', 'jobtitle', 'rpps', 'hs_object_id']
 
-  return (res.results || []).map((r: any) => ({
+  if (isEmail) {
+    // Email search — exact filter
+    await runSearch({
+      filterGroups: [{ filters: [{ propertyName: 'email', operator: 'CONTAINS_TOKEN', value: query.trim() }] }],
+      properties: baseProps,
+      limit: 25,
+    })
+  } else if (isNumeric) {
+    // RPPS search
+    await runSearch({
+      filterGroups: [{ filters: [{ propertyName: 'rpps', operator: 'EQ', value: query.trim() }] }],
+      properties: baseProps,
+      limit: 25,
+    })
+  } else {
+    // Text search: use HubSpot's full-text "query" field — searches all indexed fields
+    // including firstname, lastname, email. Handles partial matches and is case-insensitive.
+    // We run two passes: one with original input, one normalized (accent-stripped).
+    const searches = [query.trim()]
+    if (normalized !== query.trim().toLowerCase()) searches.push(normalized)
+
+    for (const q of searches) {
+      await runSearch({
+        query: q,
+        properties: baseProps,
+        limit: 25,
+      })
+    }
+
+    // Also search each word part individually via filterGroups (OR across firstname + lastname)
+    // This catches cases where full-text doesn't tokenize the same way
+    if (parts.length > 0) {
+      const filterGroups = parts.flatMap((part) => [
+        { filters: [{ propertyName: 'firstname', operator: 'CONTAINS_TOKEN', value: part }] },
+        { filters: [{ propertyName: 'lastname', operator: 'CONTAINS_TOKEN', value: part }] },
+      ])
+      await runSearch({
+        filterGroups,
+        properties: baseProps,
+        limit: 25,
+      })
+    }
+  }
+
+  return Array.from(allResults.values()).map((r: any) => ({
     id: r.id,
     firstname: r.properties.firstname || '',
     lastname: r.properties.lastname || '',
