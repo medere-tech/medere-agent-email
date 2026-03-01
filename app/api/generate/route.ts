@@ -16,8 +16,10 @@ export async function POST(req: NextRequest) {
     try {
       if (formation.public?.length) {
         // Date de fin la plus tardive des sessions sélectionnées par le PS
+        // Priorité : date_cv2 (2ème soirée CV) > date_fin > date_cv1
+        // Pour les classes virtuelles à 2 soirées, date_cv2 est la vraie date de fin
         const dateFinMax = sessions
-          .map((s: any) => s.date_fin || s.date_cv1 || '')
+          .map((s: any) => s.date_cv2 || s.date_fin || s.date_cv1 || '')
           .filter(Boolean)
           .sort()
           .at(-1) || new Date().toISOString().slice(0, 10)
