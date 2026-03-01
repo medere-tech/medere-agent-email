@@ -15,17 +15,22 @@ export async function POST(req: NextRequest) {
     let formationsLiees: Array<{ nom: string; format: string }> = []
     try {
       if (formation.public?.length) {
-        // Get formations already completed by this PS to exclude them
         const dejaFaites = await getFormationsDejaFaites(ps.rpps || '', ps.email || '')
+        console.log('[UPSELL] dejaFaites IDs:', dejaFaites)
 
         const liees = await getFormationsParPublic(formation.public)
+        console.log('[UPSELL] Formations candidates (même public):', liees.map((f: any) => ({ id: f.id, nom: f.nom })))
+
         formationsLiees = liees
-          .filter((f) => f.id !== formation.id) // exclude current formation
-          .filter((f) => !dejaFaites.includes(f.id)) // exclude already done
+          .filter((f: any) => f.id !== formation.id)
+          .filter((f: any) => !dejaFaites.includes(f.id))
           .slice(0, 3)
-          .map((f) => ({ nom: f.nom, format: f.format }))
+          .map((f: any) => ({ nom: f.nom, format: f.format }))
+
+        console.log('[UPSELL] Formations retenues après filtrage:', formationsLiees)
       }
-    } catch {
+    } catch (e) {
+      console.error('[UPSELL] Erreur dans le bloc upsell:', e)
       // Non-blocking - upsell is optional
     }
 
