@@ -385,12 +385,13 @@ export default function AgentMail() {
       <div className="w-full max-w-xl">
         {/* Header */}
         <div className="mb-6">
-          <div className="w-6 h-6 flex items-center justify-center">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <rect x="2" y="3" width="8" height="18" rx="4" fill="#111111"/>
-              <rect x="14" y="3" width="8" height="18" rx="4" fill="#111111"/>
-            </svg>
-          </div>
+          <div className="flex items-center gap-2 mb-1">
+            <div className="w-6 h-6 flex items-center justify-center">
+              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="2" y="3" width="8" height="18" rx="4" fill="#111111"/>
+                <rect x="14" y="3" width="8" height="18" rx="4" fill="#111111"/>
+              </svg>
+            </div>
             <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Médéré</span>
           </div>
           <h1 className="text-xl font-semibold text-zinc-900">Agent Mail DPC</h1>
