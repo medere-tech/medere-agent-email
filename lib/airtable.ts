@@ -69,25 +69,34 @@ export async function getCommerciauxActifs(): Promise<Commercial[]> {
 }
 
 export async function getFormationsActives(): Promise<Formation[]> {
+  // Étape 1 : formations actives
   const formula = encodeURIComponent('{Statut de la formation}="Active"')
-  const fields = [
-    'fields[]=Nom+de+la+formation',
-    `fields[]=${encodeURIComponent("Numéro d'action DPC")}`,
-    'fields[]=Format',
-    `fields[]=${encodeURIComponent('Public concerné')}`,
-    `fields[]=${encodeURIComponent('Statut de la formation')}`,
-  ].join('&')
   const data = await at(
     `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}`
   )
-  return data.records.map((r: any) => ({
+  const formations: Formation[] = data.records.map((r: any) => ({
     id: r.id,
     nom: r.fields['Nom de la formation'] || '',
     numero: String(r.fields["Numéro d'action DPC"] || ''),
     format: r.fields['Format'] || '',
     public: r.fields['Public concerné'] || [],
-    statut: r.fields['Statut de la formation'] || '',
+    statut: 'Active',
   }))
+
+  // Étape 2 : sessions futures — on ne charge que les IDs de formation liés
+  const today = new Date().toISOString().split('T')[0]
+  const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
+  const sessionsData = await at(
+    `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
+  )
+
+  // Collecte les formation IDs qui ont au moins une session future
+  const avecSessions = new Set<string>(
+    (sessionsData.records || []).flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+  )
+
+  // Étape 3 : ne retourner que les formations ayant au moins une session future
+  return formations.filter((f) => avecSessions.has(f.id))
 }
 
 export async function getSessionsByFormation(formationRecordId: string): Promise<Session[]> {
