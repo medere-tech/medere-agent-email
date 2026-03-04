@@ -81,15 +81,29 @@ function daysAgo(iso: string): string {
 async function sendSlackDM(userId: string, text: string) {
   if (!process.env.SLACK_BOT_TOKEN) throw new Error('SLACK_BOT_TOKEN manquant')
 
-  const res = await fetch('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ channel: userId, text, mrkdwn: true }),
-  })
+  const headers = {
+    Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
+    'Content-Type': 'application/json',
+  }
 
-  const data = await res.json()
-  if (!data.ok) throw new Error(`Slack error: ${data.error}`)
+  // Étape 1 : ouvrir (ou récupérer) le canal DM
+  // conversations.open crée le canal si besoin — aucune action requise du commercial
+  const openRes = await fetch('https://slack.com/api/conversations.open', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ users: userId }),
+  })
+  const openData = await openRes.json()
+  if (!openData.ok) throw new Error(`Slack conversations.open error: ${openData.error}`)
+
+  const channelId = openData.channel.id
+
+  // Étape 2 : envoyer le message dans ce canal DM
+  const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ channel: channelId, text, mrkdwn: true }),
+  })
+  const msgData = await msgRes.json()
+  if (!msgData.ok) throw new Error(`Slack chat.postMessage error: ${msgData.error}`)
 }
