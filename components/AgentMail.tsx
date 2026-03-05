@@ -282,7 +282,7 @@ export default function AgentMail() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          commercial: { name: commercial.name, email: commercial.email, phone: commercial.phone || '' },,
+          commercial: { name: commercial.name, email: commercial.email, phone: commercial.phone || '' },
           formation: { id: formation.id, nom: formation.nom, numero: formation.numero, format: formation.format, public: formation.public },
           sessions: selectedSessions.map((s) => ({
             numero: s.numero,
