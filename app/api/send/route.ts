@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
         replyTo: commercial.email,
         to: [ps.email],
         subject: sujet,
-        text: corps,
+        html: corps.replace(/\n/g, '<br>'),
       })
 
       if (error) throw new Error(error.message)

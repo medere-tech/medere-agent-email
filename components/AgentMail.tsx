@@ -673,11 +673,14 @@ export default function AgentMail() {
                     <span className="text-[10px] text-zinc-400">{mailCorps.length} caractères</span>
                   </div>
                   <textarea
-                    value={mailCorps}
-                    onChange={(e) => setMailCorps(e.target.value)}
-                    rows={14}
-                    className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y"
-                  />
+                      value={mailCorps}
+                      onChange={(e) => setMailCorps(e.target.value)}
+                      rows={14}
+                      className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y"
+                    />
+                    <div className="mt-2 p-3.5 border border-zinc-100 rounded-lg bg-zinc-50 text-sm text-zinc-700 leading-relaxed"
+                      dangerouslySetInnerHTML={{ __html: mailCorps.replace(/\n/g, '<br>') }}
+                    />
                 </div>
               </div>
 

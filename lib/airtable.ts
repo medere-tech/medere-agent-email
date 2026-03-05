@@ -251,6 +251,7 @@ export interface FormationUpsell {
   nom: string
   format: string
   prochaineSession: string // date lisible ex: "12 mai 2025"
+  url_webflow?: string
 }
 
 export async function getFormationsUpsell(
@@ -282,6 +283,7 @@ export async function getFormationsUpsell(
     formationsMap.set(r.id, {
       nom: r.fields['Nom de la formation'] || '',
       format: r.fields['Format'] || '',
+      url_webflow: r.fields['URL Webflow'] || '',
     })
   }
 
@@ -347,7 +349,7 @@ export async function getFormationsUpsell(
         month: 'long',
         year: 'numeric',
       })
-      return { nom: meta.nom, format: meta.format, prochaineSession }
+      return { nom: meta.nom, format: meta.format, prochaineSession, url_webflow: meta.url_webflow }
     })
 
   return candidates
