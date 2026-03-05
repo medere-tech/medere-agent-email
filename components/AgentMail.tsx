@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface Commercial { id: string; hubspot_id: string; name: string; email: string; slack_user_id: string }
+interface Commercial { id: string; hubspot_id: string; name: string; email: string; phone: string; slack_user_id: string }
 interface Formation { id: string; nom: string; numero: string; format: string; public: string[] }
 interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string }
 interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
