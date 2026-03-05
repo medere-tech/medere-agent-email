@@ -65,7 +65,8 @@ UPSELL (en fin de mail, si pertinent) :${upsellText || ' Aucune formation compl√
 
 SIGNATURE :
 ${commercial.name}
-${commercial.email}${commercial.phone ? `\n${commercial.phone}` : ''}
+${commercial.email}
+${commercial.phone || ''}
 
 STYLE :
 - Ton professionnel mais humain, pas robotique
