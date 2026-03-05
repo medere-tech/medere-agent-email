@@ -26,6 +26,7 @@ export interface Commercial {
   hubspot_id: string
   name: string
   email: string
+  phone: string
   slack_user_id: string
 }
 
@@ -57,13 +58,14 @@ export async function getCommerciauxActifs(): Promise<Commercial[]> {
     'fields[]': 'hubspot_id',
   })
   // fetch all fields
-  const url = `/${TABLES.commerciaux}?filterByFormula=${encodeURIComponent('{Statut}="Actif"')}&fields[]=hubspot_id&fields[]=email&fields[]=slack_user_id&fields[]=hubspot_name`
+  const url = `/${TABLES.commerciaux}?filterByFormula=${encodeURIComponent('{Statut}="Actif"')}&fields[]=hubspot_id&fields[]=email&fields[]=slack_user_id&fields[]=hubspot_name&fields[]=phone`
   const data = await at(url)
   return data.records.map((r: any) => ({
     id: r.id,
     hubspot_id: r.fields.hubspot_id || '',
     name: r.fields.hubspot_name || '',
     email: r.fields.email || '',
+    phone: r.fields.phone || '',
     slack_user_id: r.fields.slack_user_id || '',
   }))
 }
