@@ -240,7 +240,7 @@ export default function AgentMail() {
         .then((d) => setFormationsList(d.formations || []))
         .finally(() => setLoadingFormations(false))
     }
-  }, [step])
+  }, [step, formations.length])
 
   // Load sessions when formation selected
   useEffect(() => {

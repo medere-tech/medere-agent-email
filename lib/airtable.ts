@@ -278,7 +278,7 @@ export async function getFormationsUpsell(
   )
 
   // Map rapide formation_id → metadata
-  const formationsMap = new Map<string, { nom: string; format: string }>()
+  const formationsMap = new Map<string, { nom: string; format: string; url_webflow: string }>()
   for (const r of formationsData.records || []) {
     formationsMap.set(r.id, {
       nom: r.fields['Nom de la formation'] || '',
