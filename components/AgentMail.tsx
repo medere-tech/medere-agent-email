@@ -763,7 +763,7 @@ export default function AgentMail() {
 
         {/* Footer */}
         <div className="mt-4 text-center text-xs text-zinc-400">
-          Médéré · Agent Mail DPC pour les conseillers de formation DPC · Créé par <a href="https://www.linkedin.com/in/faye-dethie-responsable-seo-junior/" target="_blank" rel="noopener noreferrer" className="hover:underline">Dethie</a> Copyright © 2025 Médéré · Tous droits réservés
+          Créé par <a href="https://www.linkedin.com/in/faye-dethie-responsable-seo-junior/" target="_blank" rel="noopener noreferrer" className="hover:underline">Dethie</a> | Copyright © 2025 Médéré · Tous droits réservés
         </div>
       </div>
     </div>
