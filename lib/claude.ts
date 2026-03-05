@@ -13,7 +13,7 @@ export interface GenerateMailParams {
     temps_lisible: string
   }>
   ps: { titre: string; nom: string; prenom: string; specialite?: string }
-  formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string; url_webflow?: string }>
+  formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string }>
 }
 
 export async function generateMail(params: GenerateMailParams): Promise<{ sujet: string; corps: string }> {
@@ -31,10 +31,7 @@ export async function generateMail(params: GenerateMailParams): Promise<{ sujet:
 
   const upsellText =
     formationsLiees.length > 0
-      ? `\n\nJ'en profite également pour vous partager d'autres formations susceptibles de vous intéresser, dès que vous aurez terminé cette formation :\n${formationsLiees.map((f) => {
-          const lien = f.url_webflow ? `<a href="${f.url_webflow}">${f.nom}</a>` : f.nom
-          return `• ${lien} (${f.format})${f.prochaineSession ? ` - prochaine session disponible le ${f.prochaineSession}` : ''}`
-        }).join('\n')}`
+      ? `\n\nJ'en profite également pour vous partager d'autres formations susceptibles de vous intéresser, dès que vous aurez terminé cette formation :\n${formationsLiees.map((f) => `• ${f.nom} (${f.format})${f.prochaineSession ? ` - prochaine session disponible le ${f.prochaineSession}` : ''}`).join('\n')}`
       : ''
 
   const prompt = `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.
@@ -85,7 +82,7 @@ Réponds UNIQUEMENT avec un JSON valide dans ce format exact :
   "sujet": "...",
   "corps": "..."
 }
-Le corps doit être en HTML simple. Utilise <br> pour les retours à la ligne, <strong> pour le gras si besoin. Ne wrappe PAS dans <html> ou <body>. Les liens upsell sont déjà en HTML, conserve-les tels quels.`
+Le corps doit être en texte brut (pas de HTML), avec des retours à la ligne normaux.`
 
   const msg = await client.messages.create({
     model: 'claude-opus-4-6',
