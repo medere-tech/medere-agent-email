@@ -58,7 +58,7 @@ export async function getCommerciauxActifs(): Promise<Commercial[]> {
     'fields[]': 'hubspot_id',
   })
   // fetch all fields
-  const url = `/${TABLES.commerciaux}?filterByFormula=${encodeURIComponent('{Statut}="Actif"')}&fields[]=hubspot_id&fields[]=email&fields[]=slack_user_id&fields[]=hubspot_name&fields[]=phone`
+  const url = `/${TABLES.commerciaux}?filterByFormula=${encodeURIComponent('{Statut}="Actif"')}&fields[]=hubspot_id&fields[]=email&fields[]=phone&fields[]=slack_user_id&fields[]=hubspot_name`
   const data = await at(url)
   return data.records.map((r: any) => ({
     id: r.id,
