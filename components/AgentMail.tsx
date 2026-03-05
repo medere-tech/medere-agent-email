@@ -678,9 +678,11 @@ export default function AgentMail() {
                       rows={14}
                       className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y"
                     />
-                    <div className="mt-2 p-3.5 border border-zinc-100 rounded-lg bg-zinc-50 text-sm text-zinc-700 leading-relaxed"
+
+                    {/* Affichage du corps du mail avec rendu HTML (à décommenter en fonction des retours des commerciaux) */}
+                    {/* <div className="mt-2 p-3.5 border border-zinc-100 rounded-lg bg-zinc-50 text-sm text-zinc-700 leading-relaxed"
                       dangerouslySetInnerHTML={{ __html: mailCorps.replace(/\n/g, '<br>') }}
-                    />
+                    /> */}
                 </div>
               </div>
 
