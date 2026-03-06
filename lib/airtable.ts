@@ -257,7 +257,8 @@ export async function getFormationsUpsell(
   formationIdCourante: string,
   publicConcerne: string[],
   dateFinSessionsPS: string, // ISO date "YYYY-MM-DD" — date de fin de la dernière session sélectionnée
-  dejaFaites: string[]       // formation record IDs à exclure
+  dejaFaites: string[],       // formation record IDs à exclure
+  specialitePS: string       // ex: "Médecin généraliste"
 ): Promise<FormationUpsell[]> {
   if (!publicConcerne.length) return []
 
@@ -287,10 +288,20 @@ export async function getFormationsUpsell(
 
   // Construire le set des IDs éligibles (actives, même public, pas courante, pas déjà faites)
   const allFormationIds = Array.from(formationsMap.keys())
-  const eligibles = new Set(
-    allFormationIds.filter(
-      (id: string) => id !== formationIdCourante && !dejaFaites.includes(id)
-    )
+    const eligibles = new Set(
+      allFormationIds.filter((id: string) => {
+        if (id === formationIdCourante) return false
+        if (dejaFaites.includes(id)) return false
+        if (specialitePS) {
+          const rec = formationsData.records.find((r: any) => r.id === id)
+          const publics: string[] = rec?.fields['Public concerné'] || []
+          if (!publics.some((p: string) =>
+            p.toLowerCase().includes(specialitePS.toLowerCase()) ||
+            specialitePS.toLowerCase().includes(p.toLowerCase())
+          )) return false
+        }
+        return true
+    })
   )
 
   if (!eligibles.size) return []

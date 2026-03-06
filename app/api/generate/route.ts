@@ -30,7 +30,8 @@ export async function POST(req: NextRequest) {
           formation.id,
           formation.public,
           dateFinMax,
-          dejaFaites
+          dejaFaites,
+          ps.specialite || ''
         )
       }
     } catch (e) {
