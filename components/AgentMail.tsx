@@ -680,9 +680,9 @@ export default function AgentMail() {
                     />
 
                     {/* Affichage du corps du mail avec rendu HTML (à décommenter en fonction des retours des commerciaux) */}
-                    {/* <div className="mt-2 p-3.5 border border-zinc-100 rounded-lg bg-zinc-50 text-sm text-zinc-700 leading-relaxed"
+                    <div className="mt-2 p-3.5 border border-zinc-100 rounded-lg bg-zinc-50 text-sm text-zinc-700 leading-relaxed"
                       dangerouslySetInnerHTML={{ __html: mailCorps.replace(/\n/g, '<br>') }}
-                    /> */}
+                    />
                 </div>
               </div>
 
