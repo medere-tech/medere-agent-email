@@ -73,3 +73,10 @@ Quand le scope est disponible :
 2. Scopes : chat:write, im:write
 3. Installer dans le workspace
 4. Copier le Bot Token (xoxb-...) dans SLACK_BOT_TOKEN
+
+Fonctionnalités implémentées concernant les formations proposées en upsell
+✅ Upsell basé sur la spécialité du PS (pas la formation du jour)
+✅ Formations avec sessions disponibles après la fin de la formation en cours
+✅ Exclusion des formations déjà suivies par le PS
+✅ Normalisation tiret/espace pour matcher HubSpot → Airtable
+✅ Logs RGPD-compatibles — plus de RPPS ni email en clair

@@ -13,7 +13,7 @@ export interface GenerateMailParams {
     temps_lisible: string
   }>
   ps: { titre: string; nom: string; prenom: string; specialite?: string }
-  formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string }>
+  formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string; url_webflow?: string }>
 }
 
 export async function generateMail(params: GenerateMailParams): Promise<{ sujet: string; corps: string }> {
@@ -31,7 +31,11 @@ export async function generateMail(params: GenerateMailParams): Promise<{ sujet:
 
   const upsellText =
     formationsLiees.length > 0
-      ? `\n\nJ'en profite également pour vous partager d'autres formations susceptibles de vous intéresser, dès que vous aurez terminé cette formation :\n${formationsLiees.map((f) => `• ${f.nom} (${f.format})${f.prochaineSession ? ` - prochaine session disponible le ${f.prochaineSession}` : ''}`).join('\n')}`
+      ? `\n\nJ'en profite également pour vous partager d'autres formations susceptibles de vous intéresser, dès que vous aurez terminé cette formation :\n${formationsLiees.map((f) => {
+          const ligne1 = `• ${f.nom} (${f.format})${f.prochaineSession ? ` - prochaine session disponible le ${f.prochaineSession}` : ''}`
+          const ligne2 = f.url_webflow ? `  → ${f.url_webflow}` : ''
+          return ligne2 ? `${ligne1}\n${ligne2}` : ligne1
+        }).join('\n')}`
       : ''
 
   const prompt = `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.

@@ -241,6 +241,7 @@ export interface FormationUpsell {
   nom: string
   format: string
   prochaineSession: string // date lisible ex: "12 mai 2025"
+  url_webflow?: string
 }
 
 export async function getFormationsUpsell(
@@ -264,15 +265,17 @@ export async function getFormationsUpsell(
     `&fields[]=${encodeURIComponent('Nom de la formation')}` +
     `&fields[]=${encodeURIComponent("Numéro d'action DPC")}` +
     `&fields[]=${encodeURIComponent('Format')}` +
-    `&fields[]=${encodeURIComponent('Public concerné')}`
+    `&fields[]=${encodeURIComponent('Public concerné')}` +
+    `&fields[]=${encodeURIComponent('URL Webflow')}`
   )
 
   // Map rapide formation_id → metadata
-  const formationsMap = new Map<string, { nom: string; format: string }>()
+  const formationsMap = new Map<string, { nom: string; format: string; url_webflow: string }>()
   for (const r of formationsData.records || []) {
     formationsMap.set(r.id, {
       nom: r.fields['Nom de la formation'] || '',
       format: r.fields['Format'] || '',
+      url_webflow: r.fields['URL Webflow'] || '',
     })
   }
 
@@ -351,7 +354,7 @@ export async function getFormationsUpsell(
         month: 'long',
         year: 'numeric',
       })
-      return { nom: meta.nom, format: meta.format, prochaineSession }
+      return { nom: meta.nom, format: meta.format, prochaineSession, url_webflow: meta.url_webflow }
     })
 
   return candidates
