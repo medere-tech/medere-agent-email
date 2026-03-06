@@ -295,10 +295,13 @@ export async function getFormationsUpsell(
         if (specialitePS) {
           const rec = formationsData.records.find((r: any) => r.id === id)
           const publics: string[] = rec?.fields['Public concerné'] || []
-          if (!publics.some((p: string) =>
-            p.toLowerCase().includes(specialitePS.toLowerCase()) ||
-            specialitePS.toLowerCase().includes(p.toLowerCase())
-          )) return false
+          // On normalise tirets et espaces avant de comparer
+          const normalize = (s: string) => s.toLowerCase().replace(/[-\s]+/g, ' ').trim()
+          const specialiteNorm = normalize(specialitePS)
+          if (!publics.some((p: string) => {
+            const pNorm = normalize(p)
+            return pNorm.includes(specialiteNorm) || specialiteNorm.includes(pNorm)
+          })) return false
         }
         return true
     })
