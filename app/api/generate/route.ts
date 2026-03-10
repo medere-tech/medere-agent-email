@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Données manquantes' }, { status: 400 })
     }
 
-    // Upsell intelligent : formations actives, même public, session disponible juste après
+    // Upsell intelligent : formations actives, même public, session disponible juste après en tenant compte de la spécialité du PS, de la date de fin max des sessions sélectionnées, et que le PS n'a pas déjà faites
     let formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string }> = []
     try {
       if (formation.public?.length) {
@@ -26,11 +26,13 @@ export async function POST(req: NextRequest) {
 
         const dejaFaites = await getFormationsDejaFaites(ps.rpps || '', ps.email || '')
 
+
         formationsLiees = await getFormationsUpsell(
           formation.id,
           formation.public,
           dateFinMax,
-          dejaFaites
+          dejaFaites,
+          ps.specialite || ''
         )
       }
     } catch (e) {

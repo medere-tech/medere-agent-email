@@ -12,6 +12,7 @@
     "@anthropic-ai/sdk": "^0.78.0",
     "@vercel/kv": "^3.0.0",
     "next": "14.2.35",
+    "next-auth": "^4.24.13",
     "react": "^18",
     "react-dom": "^18",
     "resend": "^6.9.2"

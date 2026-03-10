@@ -160,10 +160,8 @@ export async function getSessionsByFormation(formationRecordId: string): Promise
 
 export async function getFormationsDejaFaites(rpps: string, email: string): Promise<string[]> {
   // Returns formation record IDs already completed by this PS
-  console.log('[UPSELL] getFormationsDejaFaites appelé avec RPPS:', rpps || '(vide)', '/ email:', email || '(vide)')
 
   if (!rpps && !email) {
-    console.log('[UPSELL] Ni RPPS ni email → retourne []')
     return []
   }
 
@@ -171,23 +169,19 @@ export async function getFormationsDejaFaites(rpps: string, email: string): Prom
     let rppsValue = rpps
 
     if (!rppsValue && email) {
-      console.log('[UPSELL] Pas de RPPS, recherche par email dans Clients...')
       const formula = encodeURIComponent(`{email}="${email}"`)
       const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`)
       if (data.records?.length) {
         rppsValue = data.records[0].fields['RPPS'] || ''
-        console.log('[UPSELL] Client trouvé par email, RPPS récupéré:', rppsValue)
       } else {
-        console.log('[UPSELL] Aucun client trouvé par email dans Airtable')
       }
     }
 
     if (!rppsValue) {
-      console.log('[UPSELL] Toujours pas de RPPS → retourne []')
       return []
     }
 
-    console.log('[UPSELL] Recherche inscriptions pour RPPS:', rppsValue)
+    
     const inscFormula = encodeURIComponent(`FIND("${rppsValue}", ARRAYJOIN({RPPS}, ","))`)
     const inscData = await at(
       `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
@@ -205,14 +199,12 @@ export async function getFormationsDejaFaites(rpps: string, email: string): Prom
       .flatMap((r: any) => r.fields['session_id'] || [])
       .filter(Boolean)
 
-    console.log('[UPSELL] session_id extraits des inscriptions:', sessionIds)
+    
 
     if (!sessionIds.length) {
-      console.log('[UPSELL] Aucun session_id → retourne []')
       return []
     }
 
-    console.log('[UPSELL] Chargement de toutes les sessions Airtable...')
     const allSessions: any[] = []
     let offset: string | undefined
     do {
@@ -231,14 +223,12 @@ export async function getFormationsDejaFaites(rpps: string, email: string): Prom
       return sid && sessionIds.includes(sid)
     })
 
-    console.log('[UPSELL] Sessions matchant les inscriptions:', matchingSessions.length, matchingSessions.map((r: any) => r.fields['session_id']))
 
     const formationIds: string[] = matchingSessions
       .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
       .filter(Boolean)
 
     const unique = Array.from(new Set(formationIds))
-    console.log('[UPSELL] Formation IDs à exclure de l\'upsell:', unique)
 
     return unique
   } catch (e) {
@@ -251,13 +241,15 @@ export interface FormationUpsell {
   nom: string
   format: string
   prochaineSession: string // date lisible ex: "12 mai 2025"
+  url_webflow?: string
 }
 
 export async function getFormationsUpsell(
   formationIdCourante: string,
   publicConcerne: string[],
   dateFinSessionsPS: string, // ISO date "YYYY-MM-DD" — date de fin de la dernière session sélectionnée
-  dejaFaites: string[]       // formation record IDs à exclure
+  dejaFaites: string[],       // formation record IDs à exclure
+  specialitePS: string       // ex: "Médecin généraliste"
 ): Promise<FormationUpsell[]> {
   if (!publicConcerne.length) return []
 
@@ -273,24 +265,39 @@ export async function getFormationsUpsell(
     `&fields[]=${encodeURIComponent('Nom de la formation')}` +
     `&fields[]=${encodeURIComponent("Numéro d'action DPC")}` +
     `&fields[]=${encodeURIComponent('Format')}` +
-    `&fields[]=${encodeURIComponent('Public concerné')}`
+    `&fields[]=${encodeURIComponent('Public concerné')}` +
+    `&fields[]=${encodeURIComponent('URL Webflow')}`
   )
 
   // Map rapide formation_id → metadata
-  const formationsMap = new Map<string, { nom: string; format: string }>()
+  const formationsMap = new Map<string, { nom: string; format: string; url_webflow: string }>()
   for (const r of formationsData.records || []) {
     formationsMap.set(r.id, {
       nom: r.fields['Nom de la formation'] || '',
       format: r.fields['Format'] || '',
+      url_webflow: r.fields['URL Webflow'] || '',
     })
   }
 
   // Construire le set des IDs éligibles (actives, même public, pas courante, pas déjà faites)
   const allFormationIds = Array.from(formationsMap.keys())
-  const eligibles = new Set(
-    allFormationIds.filter(
-      (id: string) => id !== formationIdCourante && !dejaFaites.includes(id)
-    )
+    const eligibles = new Set(
+      allFormationIds.filter((id: string) => {
+        if (id === formationIdCourante) return false
+        if (dejaFaites.includes(id)) return false
+        if (specialitePS) {
+          const rec = formationsData.records.find((r: any) => r.id === id)
+          const publics: string[] = rec?.fields['Public concerné'] || []
+          // On normalise tirets et espaces avant de comparer
+          const normalize = (s: string) => s.toLowerCase().replace(/[-\s]+/g, ' ').trim()
+          const specialiteNorm = normalize(specialitePS)
+          if (!publics.some((p: string) => {
+            const pNorm = normalize(p)
+            return pNorm.includes(specialiteNorm) || specialiteNorm.includes(pNorm)
+          })) return false
+        }
+        return true
+    })
   )
 
   if (!eligibles.size) return []
@@ -347,7 +354,7 @@ export async function getFormationsUpsell(
         month: 'long',
         year: 'numeric',
       })
-      return { nom: meta.nom, format: meta.format, prochaineSession }
+      return { nom: meta.nom, format: meta.format, prochaineSession, url_webflow: meta.url_webflow }
     })
 
   return candidates
