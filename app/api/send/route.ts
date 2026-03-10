@@ -17,6 +17,7 @@ interface SendPayload {
     nom: string
     prenom: string
     email: string
+    rpps?: string
   }
   formation: {
     nom: string
@@ -77,7 +78,7 @@ export async function POST(req: NextRequest) {
 
     // 3. Stocker pour relance J+3
     const relanceDate = new Date()
-    relanceDate.setDate(relanceDate.getDate() + 3)
+    relanceDate.setDate(relanceDate.getDate() + 0)
 
     let relanceStored = false
     try {
@@ -89,6 +90,7 @@ export async function POST(req: NextRequest) {
           commercial_name: commercial.name,
           ps_nom: `${ps.titre} ${ps.prenom} ${ps.nom}`,
           ps_email: ps.email,
+          ps_rpps: ps.rpps || '',
           ps_hubspot_id: ps.id,
           formation_nom: formation.nom,
           formation_numero: formation.numero,

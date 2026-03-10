@@ -334,6 +334,7 @@ export default function AgentMail() {
             nom: psContact.lastname,
             prenom: psContact.firstname,
             email: psContact.email,
+            rpps: psContact.rpps || '',
           },
           formation: { nom: formation!.nom, numero: formation!.numero },
           sujet: mailSujet,
