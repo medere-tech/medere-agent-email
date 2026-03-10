@@ -219,9 +219,12 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
       { method: 'PUT', body: JSON.stringify([{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }]) }
     )
 
+    console.log('[HUBSPOT] Email créé avec succès, ID:', emailObj.id)
+    console.log('[HUBSPOT] Association contact ID:', params.contactId)
+    console.log('[HUBSPOT] Owner ID:', params.hubspotOwnerId)
     return { success: true, id: emailObj.id }
   } catch (e: any) {
-    console.error('HubSpot log error:', e.message)
+    console.error('[HUBSPOT] Erreur complète:', e.message)
     return { success: false }
   }
 }
