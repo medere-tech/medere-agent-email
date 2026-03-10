@@ -214,14 +214,20 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
     })
 
     // Associate with contact
-    await hs(
-      `/crm/v4/objects/emails/${emailObj.id}/associations/contacts/${params.contactId}`,
-      { method: 'PUT', body: JSON.stringify([{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }]) }
-    )
-
     console.log('[HUBSPOT] Email créé avec succès, ID:', emailObj.id)
     console.log('[HUBSPOT] Association contact ID:', params.contactId)
     console.log('[HUBSPOT] Owner ID:', params.hubspotOwnerId)
+
+    try {
+      const assocResult = await hs(
+        `/crm/v4/objects/emails/${emailObj.id}/associations/contacts/${params.contactId}`,
+        { method: 'PUT', body: JSON.stringify([{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }]) }
+      )
+      console.log('[HUBSPOT] Association réussie:', JSON.stringify(assocResult))
+    } catch (assocError: any) {
+      console.error('[HUBSPOT] Association échouée:', assocError.message)
+    }
+
     return { success: true, id: emailObj.id }
   } catch (e: any) {
     console.error('[HUBSPOT] Erreur complète:', e.message)
