@@ -206,9 +206,9 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
           hs_email_status: 'SENT',
           hs_email_subject: params.subject,
           hs_email_text: params.body,
-          hs_email_to_email: params.toEmail,
-          hs_email_from_email: params.fromEmail,
-          hs_email_from_firstname: params.fromName,
+          //hs_email_to_email: params.toEmail,
+          //hs_email_from_email: params.fromEmail,
+          //hs_email_from_firstname: params.fromName,
         },
       }),
     })
