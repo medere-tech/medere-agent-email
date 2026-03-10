@@ -78,7 +78,7 @@ export async function POST(req: NextRequest) {
 
     // 3. Stocker pour relance J+3
     const relanceDate = new Date()
-    relanceDate.setDate(relanceDate.getDate() + 0)
+    relanceDate.setDate(relanceDate.getDate() + 3)
 
     let relanceStored = false
     try {
