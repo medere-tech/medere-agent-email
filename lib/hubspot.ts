@@ -215,7 +215,7 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
 
     // Associate with contact
     await hs(
-      `/crm/v4/objects/emails/${emailObj.id}/associations/contacts/${params.contactId}/email_to_contact`,
+      `/crm/v4/objects/emails/${emailObj.id}/associations/contacts/${params.contactId}`,
       { method: 'PUT', body: JSON.stringify([{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }]) }
     )
 
