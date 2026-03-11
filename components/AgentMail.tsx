@@ -735,7 +735,7 @@ export default function AgentMail() {
                   label="Activité HubSpot"
                   ok={sendResult.hubspot_logged}
                   disabled={sendResult.hubspot_disabled}
-                  detail={sendResult.hubspot_disabled ? 'Scope crm.objects.contacts.write requis' : sendResult.hubspot_logged ? 'Loggé sur le contact' : 'Erreur'}
+                  detail={sendResult.hubspot_disabled ? 'Scope crm.objects.contacts.write requis' : sendResult.hubspot_logged ? 'Loggé sur les "Notes" du commercial' : 'Erreur'}
                 />
                 <StatusRow
                   icon={<Icons.Calendar />}
