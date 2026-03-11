@@ -207,9 +207,23 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
         hs_email_subject: params.subject,
         hs_email_text: params.body,
         hs_email_headers: JSON.stringify({
-          from: { email: params.fromEmail, firstName: params.fromName },
-          to: [{ email: params.toEmail }],
-          cc: [], bcc: [], sender: {},
+          from: {
+            email: params.fromEmail,
+            firstName: params.fromName,
+            lastName: '',
+          },
+          sender: {
+            email: params.fromEmail,
+            firstName: params.fromName,
+            lastName: '',
+          },
+          to: [{
+            email: `${params.toEmail}`,
+            firstName: '',
+            lastName: '',
+          }],
+          cc: [],
+          bcc: [],
         }),
       },
       associations: [
@@ -228,9 +242,7 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
 
     // Relire l'email créé pour confirmer qu'il existe avec son association
     try {
-      const verification = await hs(
-        `/crm/v3/objects/emails/${emailObj.id}?properties=hs_email_subject,hs_email_status,hs_email_direction&associations=contacts`
-      )
+      const verification = await hs(`/crm/v3/objects/emails/${emailObj.id}?properties=hs_email_subject,hs_email_status,hs_email_direction,hs_email_headers`)
       console.log('[HUBSPOT] Vérification email:', JSON.stringify(verification.properties))
       console.log('[HUBSPOT] Associations contacts:', JSON.stringify(verification.associations?.contacts?.results || []))
     } catch (verifyError: any) {
