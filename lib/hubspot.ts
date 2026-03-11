@@ -221,7 +221,7 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
     try {
       const assocResult = await hs(
         `/crm/v4/objects/emails/${emailObj.id}/associations/contacts/${params.contactId}`,
-        { method: 'PUT', body: JSON.stringify([{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }]) }
+        { method: 'PUT', body: JSON.stringify([{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 210 }]) }
       )
       console.log('[HUBSPOT] Association réussie:', JSON.stringify(assocResult))
     } catch (assocError: any) {
