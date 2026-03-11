@@ -206,10 +206,13 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
           hs_email_status: 'SENT',
           hs_email_subject: params.subject,
           hs_email_text: params.body,
-          //hs_email_to_email: params.toEmail,
-          //hs_email_from_email: params.fromEmail,
-          //hs_email_from_firstname: params.fromName,
         },
+        associations: [
+          {
+            to: { id: params.contactId },
+            types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }],
+          },
+        ],
       }),
     })
 
@@ -217,16 +220,6 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
     console.log('[HUBSPOT] Email créé avec succès, ID:', emailObj.id)
     console.log('[HUBSPOT] Association contact ID:', params.contactId)
     console.log('[HUBSPOT] Owner ID:', params.hubspotOwnerId)
-
-    try {
-      const assocResult = await hs(
-        `/crm/v4/objects/emails/${emailObj.id}/associations/contacts/${params.contactId}`,
-        { method: 'PUT', body: JSON.stringify([{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 210 }]) }
-      )
-      console.log('[HUBSPOT] Association réussie:', JSON.stringify(assocResult))
-    } catch (assocError: any) {
-      console.error('[HUBSPOT] Association échouée:', assocError.message)
-    }
 
     return { success: true, id: emailObj.id }
   } catch (e: any) {
