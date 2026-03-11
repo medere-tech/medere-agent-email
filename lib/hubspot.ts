@@ -189,52 +189,30 @@ export interface LogEmailParams {
 // Requires crm.objects.contacts.write scope
 // Gracefully handles missing scope
 export async function logEmailActivity(params: LogEmailParams): Promise<{ success: boolean; id?: string; disabled?: boolean }> {
-  const WRITE_SCOPE_AVAILABLE = process.env.HS_WRITE_SCOPE_ENABLED === 'true'
-
-  if (!WRITE_SCOPE_AVAILABLE) {
-    return { success: false, disabled: true }
-  }
-
   try {
-    const emailObj = await hs('/crm/v3/objects/emails', {
+    const noteBody = `📧 Email envoyé à ${params.toEmail}\n\n**Sujet :** ${params.subject}\n\n---\n\n${params.body}`
+
+    const note = await hs('/crm/v3/objects/notes', {
       method: 'POST',
       body: JSON.stringify({
         properties: {
           hs_timestamp: new Date().toISOString(),
           hubspot_owner_id: params.hubspotOwnerId,
-          hs_email_direction: 'EMAIL',
-          hs_email_status: 'SENT',
-          hs_email_subject: params.subject,
-          hs_email_text: params.body,
-          hs_email_headers: JSON.stringify({
-            from: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
-            sender: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
-            to: [{ email: params.toEmail, firstName: '', lastName: '' }],
-            cc: [], bcc: [],
-          }),
+          hs_note_body: noteBody,
         },
+        associations: [
+          {
+            to: { id: parseInt(params.contactId) },
+            types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 202 }],
+          },
+        ],
       }),
     })
 
-    console.log('[HUBSPOT] Email créé, ID:', emailObj.id)
-
-    await hs(
-      `/crm/v3/objects/emails/${emailObj.id}/associations/contact/${params.contactId}/198`,
-      { method: 'PUT' }
-    )
-
-    const assocResult = await hs(
-      `/crm/v3/objects/emails/${emailObj.id}/associations/contact/${params.contactId}/198`,
-      { method: 'PUT' }
-    )
-    console.log('[HUBSPOT] Résultat PUT association:', JSON.stringify(assocResult))
-
-    const check = await hs(`/crm/v3/objects/emails/${emailObj.id}/associations/contacts`)
-    console.log('[HUBSPOT] Associations:', JSON.stringify(check.results || []))
-
-    return { success: true, id: emailObj.id }
+    console.log('[HUBSPOT] Note créée, ID:', note.id)
+    return { success: true, id: note.id }
   } catch (e: any) {
-    console.error('[HUBSPOT] Erreur:', e.message)
+    console.error('[HUBSPOT] Erreur note:', e.message)
     return { success: false }
   }
 }
