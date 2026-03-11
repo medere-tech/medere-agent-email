@@ -197,24 +197,29 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
 
   try {
     const emailObj = await hs('/crm/v3/objects/emails', {
-      method: 'POST',
-      body: JSON.stringify({
-        properties: {
-          hs_timestamp: new Date().toISOString(),
-          hubspot_owner_id: params.hubspotOwnerId,
-          hs_email_direction: 'EMAIL',
-          hs_email_status: 'SENT',
-          hs_email_subject: params.subject,
-          hs_email_text: params.body,
+    method: 'POST',
+    body: JSON.stringify({
+      properties: {
+        hs_timestamp: new Date().toISOString(),
+        hubspot_owner_id: params.hubspotOwnerId,
+        hs_email_direction: 'EMAIL',
+        hs_email_status: 'SENT',
+        hs_email_subject: params.subject,
+        hs_email_text: params.body,
+        hs_email_headers: JSON.stringify({
+          from: { email: params.fromEmail, firstName: params.fromName },
+          to: [{ email: params.toEmail }],
+          cc: [], bcc: [], sender: {},
+        }),
+      },
+      associations: [
+        {
+          to: { id: params.contactId },
+          types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }],
         },
-        associations: [
-          {
-            to: { id: params.contactId },
-            types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }],
-          },
-        ],
-      }),
-    })
+      ],
+    }),
+  })
 
     // Associate with contact
     console.log('[HUBSPOT] Email créé avec succès, ID:', emailObj.id)
