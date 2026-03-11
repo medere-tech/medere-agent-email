@@ -196,59 +196,39 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
   }
 
   try {
-  const emailObj = await hs('/crm/v3/objects/emails', {
-    method: 'POST',
-    body: JSON.stringify({
-      properties: {
-        hs_timestamp: new Date().toISOString(),
-        hubspot_owner_id: params.hubspotOwnerId,
-        hs_email_direction: 'EMAIL',
-        hs_email_status: 'SENT',
-        hs_email_subject: params.subject,
-        hs_email_text: params.body,
-        hs_email_headers: JSON.stringify({
-          from: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
-          sender: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
-          to: [{ email: params.toEmail, firstName: '', lastName: '' }],
-          cc: [], bcc: [],
-        }),
-      },
-    }),
-  })
+    const emailObj = await hs('/crm/v3/objects/emails', {
+      method: 'POST',
+      body: JSON.stringify({
+        properties: {
+          hs_timestamp: new Date().toISOString(),
+          hubspot_owner_id: params.hubspotOwnerId,
+          hs_email_direction: 'EMAIL',
+          hs_email_status: 'SENT',
+          hs_email_subject: params.subject,
+          hs_email_text: params.body,
+          hs_email_headers: JSON.stringify({
+            from: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
+            sender: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
+            to: [{ email: params.toEmail, firstName: '', lastName: '' }],
+            cc: [], bcc: [],
+          }),
+        },
+      }),
+    })
 
-  // Association séparée — endpoint v3 officiel
-  await hs(
-    `/crm/v3/objects/emails/${emailObj.id}/associations/contact/${params.contactId}/198`,
-    { method: 'PUT' }
-  )
+    console.log('[HUBSPOT] Email créé, ID:', emailObj.id)
 
-  // Vérification
-  const check = await hs(`/crm/v3/objects/emails/${emailObj.id}/associations/contacts`)
-  console.log('[HUBSPOT] Associations contacts:', JSON.stringify(check.results || []))
+    await hs(
+      `/crm/v3/objects/emails/${emailObj.id}/associations/contact/${params.contactId}/198`,
+      { method: 'PUT' }
+    )
 
-  return { success: true, id: emailObj.id }
-} catch (e: any) {
-  console.error('HubSpot log error:', e.message)
-  return { success: false }
-}
-
-    // Associate with contact
-    console.log('[HUBSPOT] Email créé avec succès, ID:', emailObj.id)
-    console.log('[HUBSPOT] Association contact ID:', params.contactId)
-    console.log('[HUBSPOT] Owner ID:', params.hubspotOwnerId)
-
-    // Relire l'email créé pour confirmer qu'il existe avec son association
-    try {
-      const verification = await hs(`/crm/v3/objects/emails/${emailObj.id}?properties=hs_email_subject,hs_email_status,hs_email_direction,hs_email_headers`)
-      console.log('[HUBSPOT] Vérification email:', JSON.stringify(verification.properties))
-      console.log('[HUBSPOT] Associations contacts:', JSON.stringify(verification.associations?.contacts?.results || []))
-    } catch (verifyError: any) {
-      console.error('[HUBSPOT] Erreur vérification:', verifyError.message)
-    }
+    const check = await hs(`/crm/v3/objects/emails/${emailObj.id}/associations/contacts`)
+    console.log('[HUBSPOT] Associations:', JSON.stringify(check.results || []))
 
     return { success: true, id: emailObj.id }
   } catch (e: any) {
-    console.error('[HUBSPOT] Erreur complète:', e.message)
+    console.error('[HUBSPOT] Erreur:', e.message)
     return { success: false }
   }
 }
