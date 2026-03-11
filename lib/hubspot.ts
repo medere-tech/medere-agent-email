@@ -196,7 +196,7 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
   }
 
   try {
-    const emailObj = await hs('/crm/v3/objects/emails', {
+  const emailObj = await hs('/crm/v3/objects/emails', {
     method: 'POST',
     body: JSON.stringify({
       properties: {
@@ -207,33 +207,30 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
         hs_email_subject: params.subject,
         hs_email_text: params.body,
         hs_email_headers: JSON.stringify({
-          from: {
-            email: params.fromEmail,
-            firstName: params.fromName,
-            lastName: '',
-          },
-          sender: {
-            email: params.fromEmail,
-            firstName: params.fromName,
-            lastName: '',
-          },
-          to: [{
-            email: `${params.toEmail}`,
-            firstName: '',
-            lastName: '',
-          }],
-          cc: [],
-          bcc: [],
+          from: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
+          sender: { email: params.fromEmail, firstName: params.fromName, lastName: '' },
+          to: [{ email: params.toEmail, firstName: '', lastName: '' }],
+          cc: [], bcc: [],
         }),
       },
-      associations: [
-        {
-          to: { id: parseInt(params.contactId) },
-          types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }],
-        },
-      ],
     }),
   })
+
+  // Association séparée — endpoint v3 officiel
+  await hs(
+    `/crm/v3/objects/emails/${emailObj.id}/associations/contact/${params.contactId}/198`,
+    { method: 'PUT' }
+  )
+
+  // Vérification
+  const check = await hs(`/crm/v3/objects/emails/${emailObj.id}/associations/contacts`)
+  console.log('[HUBSPOT] Associations contacts:', JSON.stringify(check.results || []))
+
+  return { success: true, id: emailObj.id }
+} catch (e: any) {
+  console.error('HubSpot log error:', e.message)
+  return { success: false }
+}
 
     // Associate with contact
     console.log('[HUBSPOT] Email créé avec succès, ID:', emailObj.id)
