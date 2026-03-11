@@ -221,6 +221,17 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
     console.log('[HUBSPOT] Association contact ID:', params.contactId)
     console.log('[HUBSPOT] Owner ID:', params.hubspotOwnerId)
 
+    // Relire l'email créé pour confirmer qu'il existe avec son association
+    try {
+      const verification = await hs(
+        `/crm/v3/objects/emails/${emailObj.id}?properties=hs_email_subject,hs_email_status,hs_email_direction&associations=contacts`
+      )
+      console.log('[HUBSPOT] Vérification email:', JSON.stringify(verification.properties))
+      console.log('[HUBSPOT] Associations contacts:', JSON.stringify(verification.associations?.contacts?.results || []))
+    } catch (verifyError: any) {
+      console.error('[HUBSPOT] Erreur vérification:', verifyError.message)
+    }
+
     return { success: true, id: emailObj.id }
   } catch (e: any) {
     console.error('[HUBSPOT] Erreur complète:', e.message)
