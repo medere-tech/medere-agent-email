@@ -46,11 +46,12 @@ export async function POST(req: NextRequest) {
 
     try {
       const { data, error } = await resend.emails.send({
-        from: `${fromName} – Médéré <noreply@${domain}>`,
+        from: `${fromName} – Médéré <reply@${domain}>`,
         replyTo: commercial.email,
         to: [ps.email],
         subject: sujet,
         html: corps.replace(/\n/g, '<br>'),
+        bcc: process.env.HUBSPOT_BCC_EMAIL,
       })
 
       if (error) throw new Error(error.message)
