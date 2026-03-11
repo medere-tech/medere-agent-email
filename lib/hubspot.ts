@@ -190,7 +190,7 @@ export interface LogEmailParams {
 // Gracefully handles missing scope
 export async function logEmailActivity(params: LogEmailParams): Promise<{ success: boolean; id?: string; disabled?: boolean }> {
   try {
-    const noteBody = `📧 Email envoyé à ${params.toEmail}\n\n**Sujet :** ${params.subject}\n\n---\n\n${params.body}`
+    const noteBody = `📧 <b>Email envoyé à ${params.toEmail}</b><br><br><b>Sujet :</b> ${params.subject}<br><br>---<br><br>${params.body.replace(/\n/g, '<br>')}`
 
     const note = await hs('/crm/v3/objects/notes', {
       method: 'POST',
