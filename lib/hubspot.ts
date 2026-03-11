@@ -228,7 +228,7 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
       },
       associations: [
         {
-          to: { id: params.contactId },
+          to: { id: parseInt(params.contactId) },
           types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 198 }],
         },
       ],
