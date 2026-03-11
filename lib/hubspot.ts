@@ -202,7 +202,7 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
         properties: {
           hs_timestamp: new Date().toISOString(),
           hubspot_owner_id: params.hubspotOwnerId,
-          hs_email_direction: 'OUTBOUND',
+          hs_email_direction: 'EMAIL',
           hs_email_status: 'SENT',
           hs_email_subject: params.subject,
           hs_email_text: params.body,
