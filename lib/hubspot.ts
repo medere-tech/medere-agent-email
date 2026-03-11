@@ -223,6 +223,12 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
       { method: 'PUT' }
     )
 
+    const assocResult = await hs(
+      `/crm/v3/objects/emails/${emailObj.id}/associations/contact/${params.contactId}/198`,
+      { method: 'PUT' }
+    )
+    console.log('[HUBSPOT] Résultat PUT association:', JSON.stringify(assocResult))
+
     const check = await hs(`/crm/v3/objects/emails/${emailObj.id}/associations/contacts`)
     console.log('[HUBSPOT] Associations:', JSON.stringify(check.results || []))
 
