@@ -37,6 +37,11 @@ export async function GET(req: NextRequest) {
           continue
         }
 
+        if (!item.commercial_slack_id) {
+          errors.push(`${key}: slack_user_id manquant pour ${item.commercial_name}`)
+          continue
+        }
+
         const slackMsg = buildSlackMessage(item)
         await sendSlackDM(item.commercial_slack_id, slackMsg)
         await kv.del(key)
@@ -72,7 +77,7 @@ La formation "${item.formation_nom}" est toujours disponible et intégralement p
 ${item.commercial_name}
 ---
 
-👉 Contact HubSpot : https://app.hubspot.com/contacts/0/contact/${item.ps_hubspot_id}`
+👉 Contact HubSpot : https://app-eu1.hubspot.com/contacts/26228968/contacts/${item.ps_hubspot_id}`
 }
 
 function formatDate(iso: string): string {
