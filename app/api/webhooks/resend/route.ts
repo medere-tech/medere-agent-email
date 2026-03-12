@@ -16,7 +16,7 @@ export async function POST(req: NextRequest) {
             timestamp: req.headers.get('svix-timestamp') ?? '',
             signature: req.headers.get('svix-signature') ?? '',
         },
-        secret: process.env.RESEND_WEBHOOK_SECRET!,
+        webhookSecret: process.env.RESEND_WEBHOOK_SECRET!,
     })
 
     console.log('[WEBHOOK] Event reçu:', event.type, event.data?.email_id)
