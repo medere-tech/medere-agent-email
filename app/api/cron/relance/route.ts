@@ -20,9 +20,12 @@ export async function GET(req: NextRequest) {
     
     // Scan all relance keys
     const keys = await kv.keys('relance:*')
+    console.log('[CRON] Date today:', today)
+    console.log('[CRON] Clés trouvées:', keys.length, keys)
 
     for (const key of keys) {
       const item = await kv.get<any>(key)
+      console.log('[CRON] Item:', key, '→ relance_at:', item?.relance_at, '| match:', item?.relance_at === today)
       if (!item || item.relance_at !== today) continue
 
       // Send Slack DM to the commercial
