@@ -19,14 +19,15 @@ export async function POST(req: NextRequest) {
         webhookSecret: process.env.RESEND_WEBHOOK_SECRET!,
     })
 
-    console.log('[WEBHOOK] Event reçu:', event.type, event.data?.email_id)
+    const data = event.data as any
+    console.log('[WEBHOOK] Event reçu:', event.type, data?.email_id)
 
     // Uniquement email.opened et email.clicked
     if (event.type !== 'email.opened' && event.type !== 'email.clicked') {
-      return NextResponse.json({ received: true })
+    return NextResponse.json({ received: true })
     }
 
-    const emailId = event.data?.email_id
+    const emailId = data?.email_id
     if (!emailId) return NextResponse.json({ received: true })
 
     // Retrouver le contact via le KV
