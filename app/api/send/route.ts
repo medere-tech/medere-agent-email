@@ -51,6 +51,7 @@ export async function POST(req: NextRequest) {
         to: [ps.email],
         subject: sujet,
         html: corps.replace(/\n/g, '<br>'),
+        bcc: [commercial.email],
       })
 
       if (error) throw new Error(error.message)
