@@ -57,6 +57,16 @@ export async function POST(req: NextRequest) {
       if (error) throw new Error(error.message)
       emailSent = true
       resendId = data?.id
+
+      // Ajouter juste après :
+    if (resendId && process.env.KV_REST_API_URL) {
+      const { kv } = await import('@vercel/kv')
+      await kv.set(
+        `email_track:${resendId}`,
+        { contact_id: ps.id, commercial_name: commercial.name, sujet },
+        { ex: 60 * 60 * 24 * 30 } // expire après 30 jours
+      )
+    }
     } catch (e: any) {
       console.error('Resend error:', e.message)
       // Continue — log HubSpot even if send fails, surface the error
