@@ -57,7 +57,7 @@ INSTRUCTIONS DPC À INCLURE :
 1. Se rendre sur www.agencedpc.fr/professionnel/
 2. Cliquer sur "S'identifier" (identifiant = adresse mail DPC, ou "mot de passe oublié" si besoin)
 3. Aller dans "Actions DPC" > "Rechercher une action/S'inscrire"
-4. Entrer le numéro de programme : ${formation.numero}
+4. Entrer le numéro de l'action DPC : ${formation.numero}
 5. Dans "Détail" > "Liste sessions", choisir la session souhaitée
 6. Cliquer sur "S'inscrire"
 
@@ -80,6 +80,7 @@ STYLE :
 - Invitation à revenir vers le commercial
 - Signature complète
 - N'oublie pas de dire Bonjour,
+- Les formations en classe viruelle ont lieu en soirée à partir de 19h00
 
 Réponds UNIQUEMENT avec un JSON valide dans ce format exact :
 {
