@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Agent Mail DPC — Médéré',
+  title: 'Agent Mail DPC - Médéré',
   description: 'Génère et envoie des mails DPC personnalisés en un clic',
 }
 
