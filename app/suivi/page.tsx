@@ -153,6 +153,13 @@ function pct(num: number, den: number) {
   return `${Math.round((num / den) * 100)} %`
 }
 
+function abrevTitre(nom: string) {
+  return nom
+    .replace(/^Docteur\s/i, 'Dr ')
+    .replace(/^Madame\s/i, 'Mme ')
+    .replace(/^Monsieur\s/i, 'M. ')
+}
+
 // ─── Page principale ──────────────────────────────────────────────────────────
 export default function SuiviPage() {
   const [data, setData] = useState<ApiResponse | null>(null)
@@ -297,7 +304,7 @@ export default function SuiviPage() {
                     </colgroup>
                   <thead>
                     <tr className="border-b border-zinc-100">
-                      <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Professionnel de santé</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Pro de santé</th>
                       <th className="hidden sm:table-cell text-left px-4 py-3 text-xs font-medium text-zinc-500">Commercial</th>
                       <th className="hidden sm:table-cell text-left px-4 py-3 text-xs font-medium text-zinc-500">Formation</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Statut</th>
@@ -318,7 +325,7 @@ export default function SuiviPage() {
                             }`}
                           >
                             <td className="px-4 py-3">
-                              <div className="font-medium text-zinc-900 truncate text-sm" title={email.ps_nom}>{email.ps_nom}</div>
+                              <div className="font-medium text-zinc-900 truncate text-sm" title={email.ps_nom}>{abrevTitre(email.ps_nom)}</div>
                               <div className="text-xs text-zinc-400 truncate" title={email.ps_email}>{email.ps_email}</div>
                             </td>
                             <td className="hidden sm:table-cell px-4 py-3 text-xs text-zinc-700 truncate">
