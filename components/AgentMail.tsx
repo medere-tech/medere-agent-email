@@ -397,17 +397,10 @@ export default function AgentMail() {
           </div>
           <h1 className="text-xl font-semibold text-zinc-900">Agent Mail DPC</h1>
           <p className="text-sm text-zinc-500 mt-0.5">Génère et envoie un mail personnalisé en moins de 60 secondes</p>
+          <Link href="/suivi" className="text-sm text-blue-500 hover:text-blue-700">
+            Voir le suivi des emails
+          </Link>
         </div>
-
-        href="/suivi"
-          className="flex items-center gap-1.5 px-3 py-2 border border-zinc-200 text-xs font-medium text-zinc-600 rounded-lg hover:bg-zinc-100 transition-colors"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <rect x="1.5" y="3.5" width="13" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
-            <path d="M1.5 5.5L8 9.5L14.5 5.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
-          Suivi des envois
-        </a>
 
         {/* Card */}
         <div className="bg-white border border-zinc-200 rounded-xl shadow-sm p-6">
