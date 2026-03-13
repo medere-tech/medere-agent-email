@@ -288,20 +288,20 @@ export default function SuiviPage() {
               <div className="overflow-x-auto -mx-0 sm:mx-0">
                 <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
                   <colgroup>
-                    <col style={{ width: '22%' }} />
-                    <col style={{ width: '13%' }} />
-                    <col style={{ width: '26%' }} />
-                    <col style={{ width: '12%' }} />
-                    <col style={{ width: '13%' }} />
-                    <col style={{ width: '14%' }} />
-                  </colgroup>
+                    <col />
+                    <col className="hidden sm:table-column" />
+                    <col className="hidden sm:table-column" />
+                    <col />
+                    <col className="hidden sm:table-column" />
+                    <col />
+                    </colgroup>
                   <thead>
                     <tr className="border-b border-zinc-100">
                       <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Professionnel de santé</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Commercial</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Formation</th>
+                      <th className="hidden sm:table-cell text-left px-4 py-3 text-xs font-medium text-zinc-500">Commercial</th>
+                      <th className="hidden sm:table-cell text-left px-4 py-3 text-xs font-medium text-zinc-500">Formation</th>
                       <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Statut</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-zinc-500">Envoyé</th>
+                      <th className="hidden sm:table-cell text-left px-4 py-3 text-xs font-medium text-zinc-500">Envoyé</th>
                       <th className="px-4 py-3" />
                     </tr>
                   </thead>
@@ -321,19 +321,19 @@ export default function SuiviPage() {
                               <div className="font-medium text-zinc-900 truncate text-sm" title={email.ps_nom}>{email.ps_nom}</div>
                               <div className="text-xs text-zinc-400 truncate" title={email.ps_email}>{email.ps_email}</div>
                             </td>
-                            <td className="px-4 py-3 text-xs text-zinc-700 truncate">
+                            <td className="hidden sm:table-cell px-4 py-3 text-xs text-zinc-700 truncate">
                               {email.commercial_name.split(' ')[0]}
                             </td>
-                            <td className="px-4 py-3">
-                              <div className="text-xs text-zinc-700 leading-snug line-clamp-2" title={email.formation_nom}>
+                            <td className="hidden sm:table-cell px-4 py-3">
+                                <div className="text-xs text-zinc-700 leading-snug line-clamp-2" title={email.formation_nom}>
                                 {email.formation_nom}
                               </div>
                             </td>
                             <td className="px-4 py-3">
                               <StatutBadge statut={email.statut} />
                             </td>
-                            <td className="px-4 py-3">
-                              <span className="text-xs text-zinc-500" title={formatFull(email.sent_at)}>
+                            <td className="hidden sm:table-cell px-4 py-3">
+                                <span className="text-xs text-zinc-500" title={formatFull(email.sent_at)}>
                                 {formatRelative(email.sent_at)}
                               </span>
                             </td>
