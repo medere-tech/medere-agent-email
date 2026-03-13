@@ -201,7 +201,7 @@ export default function SuiviPage() {
       <div className="w-full max-w-5xl mx-auto">
 
         {/* Header */}
-        <div className="mb-6 flex items-start justify-between">
+        <div className="mb-6 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
           <div>
             <div className="flex items-center gap-2 mb-1">
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -235,7 +235,7 @@ export default function SuiviPage() {
 
         {/* Stats — calculées sur la totalité de l'index */}
         {data && (
-          <div className="grid grid-cols-3 gap-3 mb-6">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
             <StatCard
               label="Mails envoyés"
               value={data.stats.total}
@@ -285,7 +285,7 @@ export default function SuiviPage() {
 
           {!loading && !error && data && data.emails.length > 0 && (
             <>
-              <div className="overflow-x-auto">
+              <div className="overflow-x-auto -mx-0 sm:mx-0">
                 <table className="w-full text-sm" style={{ tableLayout: 'fixed' }}>
                   <colgroup>
                     <col style={{ width: '22%' }} />
@@ -360,7 +360,7 @@ export default function SuiviPage() {
                           {isExpanded && (
                             <tr key={`${email.resend_id}-exp`} className="bg-zinc-50 border-b border-zinc-100">
                               <td colSpan={6} className="px-4 py-3">
-                                <div className="grid grid-cols-3 gap-6 text-xs">
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
                                   <div>
                                     <div className="text-zinc-400 mb-1.5 font-medium">Sujet</div>
                                     <div className="text-zinc-700">{email.sujet}</div>
