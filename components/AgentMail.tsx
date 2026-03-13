@@ -397,9 +397,7 @@ export default function AgentMail() {
           </div>
           <h1 className="text-xl font-semibold text-zinc-900">Agent Mail DPC</h1>
           <p className="text-sm text-zinc-500 mt-0.5">Génère et envoie un mail personnalisé en moins de 60 secondes</p>
-          <Link href="/suivi" className="text-sm text-blue-500 hover:text-blue-700">
-            Voir le suivi des emails
-          </Link>
+          <p> <a href="/suivi" className="hover:underline">Voir le suivi des emails</a></p>
         </div>
 
         {/* Card */}
