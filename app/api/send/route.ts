@@ -74,8 +74,7 @@ export async function POST(req: NextRequest) {
           sent_at: new Date().toISOString(),
           opened_at: null,
           clicked_at: null,
-        },
-        { ex: 60 * 60 * 24 * 30 }
+        },        
       )
       await kv.zadd('emails_index', { score: Date.now(), member: resendId })
     }
