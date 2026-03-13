@@ -63,9 +63,21 @@ export async function POST(req: NextRequest) {
       const { kv } = await import('@vercel/kv')
       await kv.set(
         `email_track:${resendId}`,
-        { contact_id: ps.id, commercial_name: commercial.name, sujet },
-        { ex: 60 * 60 * 24 * 30 } // expire après 30 jours
+        {
+          contact_id: ps.id,
+          ps_nom: `${ps.titre} ${ps.prenom} ${ps.nom}`.trim(),
+          ps_email: ps.email,
+          commercial_name: commercial.name,
+          formation_nom: formation.nom,
+          sujet,
+          statut: 'envoyé',
+          sent_at: new Date().toISOString(),
+          opened_at: null,
+          clicked_at: null,
+        },
+        { ex: 60 * 60 * 24 * 30 }
       )
+      await kv.zadd('emails_index', { score: Date.now(), member: resendId })
     }
     } catch (e: any) {
       console.error('Resend error:', e.message)

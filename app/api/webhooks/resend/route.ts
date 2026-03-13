@@ -54,6 +54,18 @@ export async function POST(req: NextRequest) {
     )
 
     console.log('[WEBHOOK] Note HubSpot créée pour contact:', tracked.contact_id)
+
+    const updatedField = event.type === 'email.opened'
+    ? { statut: 'ouvert', opened_at: new Date().toISOString() }
+    : { statut: 'cliqué', clicked_at: new Date().toISOString() }
+
+    await kv.set(
+    `email_track:${emailId}`,
+    { ...tracked, ...updatedField },
+    { ex: 60 * 60 * 24 * 30 }
+    )
+
+    console.log('[WEBHOOK] Statut KV mis à jour:', updatedField.statut)
     return NextResponse.json({ received: true })
 
   } catch (e: any) {
