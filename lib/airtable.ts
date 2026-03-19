@@ -71,8 +71,8 @@ export async function getCommerciauxActifs(): Promise<Commercial[]> {
 }
 
 export async function getFormationsActives(): Promise<Formation[]> {
-  // Étape 1 : formations actives
-  const formula = encodeURIComponent('{Statut de la formation}="Active"')
+  // Étape 1 : formations actives avec numéro DPC
+  const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
   const data = await at(
     `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}`
   )
@@ -85,10 +85,10 @@ export async function getFormationsActives(): Promise<Formation[]> {
     statut: 'Active',
   }))
 
-  // Étape 2 : sessions futures — on ne charge que les IDs de formation liés
+  // Étape 2 : sessions futures avec webflow_id — avec pagination complète
   const today = new Date().toISOString().split('T')[0]
-  const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
-  
+  const sessionsFormula = encodeURIComponent(`AND(IS_AFTER({Date de début de session}, "${today}"), {webflow_id}!="")`)
+
   const allSessionRecords: any[] = []
   let offset: string | undefined
   do {
@@ -100,12 +100,11 @@ export async function getFormationsActives(): Promise<Formation[]> {
     offset = data.offset
   } while (offset)
 
-  // Collecte les formation IDs qui ont au moins une session future
+  // Étape 3 : formations ayant au moins une session future avec webflow_id
   const avecSessions = new Set<string>(
     allSessionRecords.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
   )
 
-  // Étape 3 : ne retourner que les formations ayant au moins une session future
   return formations.filter((f) => avecSessions.has(f.id))
 }
 
