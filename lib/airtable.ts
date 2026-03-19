@@ -88,13 +88,21 @@ export async function getFormationsActives(): Promise<Formation[]> {
   // Étape 2 : sessions futures — on ne charge que les IDs de formation liés
   const today = new Date().toISOString().split('T')[0]
   const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
-  const sessionsData = await at(
-    `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
-  )
+  
+  const allSessionRecords: any[] = []
+  let offset: string | undefined
+  do {
+    const offsetParam = offset ? `&offset=${offset}` : ''
+    const data = await at(
+      `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}${offsetParam}`
+    )
+    allSessionRecords.push(...(data.records || []))
+    offset = data.offset
+  } while (offset)
 
   // Collecte les formation IDs qui ont au moins une session future
   const avecSessions = new Set<string>(
-    (sessionsData.records || []).flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+    allSessionRecords.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
   )
 
   // Étape 3 : ne retourner que les formations ayant au moins une session future
