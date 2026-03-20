@@ -71,12 +71,20 @@ export async function getCommerciauxActifs(): Promise<Commercial[]> {
 }
 
 export async function getFormationsActives(): Promise<Formation[]> {
-  // Étape 1 : formations actives avec numéro DPC
+  // Étape 1 : formations actives avec numéro DPC — avec pagination
   const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
-  const data = await at(
-    `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}`
-  )
-  const formations: Formation[] = data.records.map((r: any) => ({
+  const allFormationRecords: any[] = []
+  let offsetF: string | undefined
+  do {
+    const offsetParam = offsetF ? `&offset=${offsetF}` : ''
+    const data = await at(
+      `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}${offsetParam}`
+    )
+    allFormationRecords.push(...(data.records || []))
+    offsetF = data.offset
+  } while (offsetF)
+
+  const formations: Formation[] = allFormationRecords.map((r: any) => ({
     id: r.id,
     nom: r.fields['Nom de la formation'] || '',
     numero: String(r.fields["Numéro d'action DPC"] || ''),
@@ -85,22 +93,22 @@ export async function getFormationsActives(): Promise<Formation[]> {
     statut: 'Active',
   }))
 
-  // Étape 2 : sessions futures avec webflow_id — avec pagination complète
+  // Étape 2 : sessions futures — pagination + sans filtre webflow_id ici
   const today = new Date().toISOString().split('T')[0]
-  const sessionsFormula = encodeURIComponent(`AND(IS_AFTER({Date de début de session}, "${today}"), {webflow_id}!="")`)
+  const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
 
   const allSessionRecords: any[] = []
-  let offset: string | undefined
+  let offsetS: string | undefined
   do {
-    const offsetParam = offset ? `&offset=${offset}` : ''
+    const offsetParam = offsetS ? `&offset=${offsetS}` : ''
     const data = await at(
       `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}${offsetParam}`
     )
     allSessionRecords.push(...(data.records || []))
-    offset = data.offset
-  } while (offset)
+    offsetS = data.offset
+  } while (offsetS)
 
-  // Étape 3 : formations ayant au moins une session future avec webflow_id
+  // Étape 3 : formations ayant au moins une session future
   const avecSessions = new Set<string>(
     allSessionRecords.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
   )
