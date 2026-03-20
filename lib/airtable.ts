@@ -71,10 +71,12 @@ export async function getCommerciauxActifs(): Promise<Commercial[]> {
 }
 
 export async function getFormationsActives(): Promise<Formation[]> {
+  // ── OPTION A : formations actives avec numéro DPC ET au moins une session future ──
+  // Décommenter ce bloc et commenter le bloc OPTION A pour activer
   // Étape 1 : formations actives avec numéro DPC — avec pagination
-  const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
+  /* const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
   const allFormationRecords: any[] = []
-  let offsetF: string | undefined
+  let offsetF: string | undefined 
   do {
     const offsetParam = offsetF ? `&offset=${offsetF}` : ''
     const data = await at(
@@ -113,7 +115,31 @@ export async function getFormationsActives(): Promise<Formation[]> {
     allSessionRecords.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
   )
 
-  return formations.filter((f) => avecSessions.has(f.id))
+  return formations.filter((f) => avecSessions.has(f.id))*/
+
+
+  // ── OPTION B : formations actives avec numéro DPC uniquement (recommandé par Maylis) ──
+  // Pour activer : commenter le bloc OPTION B au-dessus et décommenter ce bloc
+  const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
+  const allFormationRecords: any[] = []
+  let offsetF: string | undefined
+  do {
+    const offsetParam = offsetF ? `&offset=${offsetF}` : ''
+    const data = await at(
+      `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}${offsetParam}`
+    )
+    allFormationRecords.push(...(data.records || []))
+    offsetF = data.offset
+  } while (offsetF)
+
+  return allFormationRecords.map((r: any) => ({
+    id: r.id,
+    nom: r.fields['Nom de la formation'] || '',
+    numero: String(r.fields["Numéro d'action DPC"] || ''),
+    format: r.fields['Format'] || '',
+    public: r.fields['Public concerné'] || [],
+    statut: 'Active',
+  }))
 }
 
 export async function getSessionsByFormation(formationRecordId: string): Promise<Session[]> {
