@@ -156,6 +156,7 @@ export async function getSessionsByFormation(formationRecordId: string): Promise
     encodeURIComponent("Date limite d'inscription"),
     encodeURIComponent('Temps lisible (Webflow)'),
     encodeURIComponent("Numéro d'action DPC"),
+    encodeURIComponent('webflow_id'),
   ].map(f => `fields[]=${f}`).join('&')
 
   const sort = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
@@ -179,6 +180,9 @@ export async function getSessionsByFormation(formationRecordId: string): Promise
       // The linked field returns an array of record IDs in the API response
       const linkedFormations: string[] = r.fields["Numéro d'action DPC"] || []
       if (!linkedFormations.includes(formationRecordId)) return false
+
+      // Exclure les sessions sans webflow_id (doublons)
+      if (!r.fields['webflow_id']) return false
 
       // Filter future sessions only (skip if no date)
       const dateDebut = r.fields['Date de début de session']
