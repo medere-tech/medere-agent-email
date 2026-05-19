@@ -142,7 +142,7 @@ export async function getFormationsActives(): Promise<Formation[]> {
   }))
 }
 
-export async function getSessionsByFormation(formationRecordId: string): Promise<Session[]> {
+export async function getSessionsByFormation(formationRecordId: string, formationFormat: string = ''): Promise<Session[]> {
   // Fetch all sessions with pagination, filter client-side
   // Reason: ARRAYJOIN on linked record fields returns primary field values (not record IDs),
   // so FIND("recXXX", ...) never matches in Airtable formulas.
@@ -186,8 +186,21 @@ export async function getSessionsByFormation(formationRecordId: string): Promise
 
       // Filter future sessions only (skip if no date)
       const dateDebut = r.fields['Date de début de session']
-      if (!dateDebut) return true // include if no date set
+      const dateFin = r.fields['Date de fin de session']
+      const isElearning = formationFormat.toLowerCase().includes('e-learning')
+
+      if (!dateDebut) return true
+
+      if (isElearning) {
+      // E-learning : inclure les sessions en cours (commencées mais pas encore terminées)
+      // Exclure uniquement si la date de fin est dépassée
+      if (dateFin && new Date(dateFin) < today) return false
+      return true
+      }
+
+      // Autres formats : uniquement les sessions futures
       return new Date(dateDebut) >= today
+      
     })
     .map((r: any) => ({
       id: r.id,

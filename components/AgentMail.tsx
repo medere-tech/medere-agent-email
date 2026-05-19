@@ -248,7 +248,7 @@ export default function AgentMail() {
     setLoadingSessions(true)
     setSessionsList([])
     setSelectedSessions([])
-    fetch(`/api/sessions?formationId=${formation.id}`)
+    fetch(`/api/sessions?formationId=${formation.id}&format=${encodeURIComponent(formation.format)}`)
       .then((r) => r.json())
       .then((d) => setSessionsList(d.sessions || []))
       .finally(() => setLoadingSessions(false))
