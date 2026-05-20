@@ -50,7 +50,12 @@ export async function POST(req: NextRequest) {
         replyTo: commercial.email,
         to: [ps.email],
         subject: sujet,
-        html: corps.replace(/\n/g, '<br>'),
+        html: corps
+          .replace(/\n/g, '<br>')
+          // Convertir les liens Markdown [texte](url) en balises <a>
+          .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, '<a href="$2">$1</a>')
+          // Convertir les URLs brutes restantes en balises <a>
+          .replace(/(^|[\s<br>])(https?:\/\/[^\s<]+)/g, '$1<a href="$2">$2</a>'),
         bcc: [commercial.email],
       })
 

@@ -81,6 +81,8 @@ STYLE :
 - Signature complète
 - N'oublie pas de dire Bonjour,
 - Les formations en classe viruelle ont lieu en soirée à partir de 19h00
+- Si tu dois utiliser des tirets, utilise des tirets courts (-) et n'utilise jamais de tirets longs
+
 
 Réponds UNIQUEMENT avec un JSON valide dans ce format exact :
 {

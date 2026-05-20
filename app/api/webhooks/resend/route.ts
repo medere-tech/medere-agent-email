@@ -32,7 +32,7 @@ export async function POST(req: NextRequest) {
 
     // Retrouver le contact via le KV
     const { kv } = await import('@vercel/kv')
-    const tracked = await kv.get<{ contact_id: string; commercial_name: string; sujet: string }>(
+    const tracked = await kv.get<Record<string, any>>(
       `email_track:${emailId}`
     )
 
@@ -61,8 +61,7 @@ export async function POST(req: NextRequest) {
 
     await kv.set(
     `email_track:${emailId}`,
-    { ...tracked, ...updatedField },
-    { ex: 60 * 60 * 24 * 30 }
+    { ...tracked, ...updatedField }
     )
 
     console.log('[WEBHOOK] Statut KV mis à jour:', updatedField.statut)
