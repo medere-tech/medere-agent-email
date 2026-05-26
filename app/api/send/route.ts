@@ -55,7 +55,9 @@ export async function POST(req: NextRequest) {
           // Convertir les liens Markdown [texte](url) en balises ahrefs <a>
           .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, '<a href="$2">$1</a>')
           // Convertir les URLs brutes restantes en balises <a>
-          .replace(/(^|[\s<br>])(https?:\/\/[^\s<]+)/g, '$1<a href="$2">$2</a>'),
+          .replace(/(^|[\s<br>])(https?:\/\/[^\s<]+)/g, '$1<a href="$2">$2</a>')
+          // Convertir les URLs brutes commençant par www.
+          .replace(/(^|[\s<br>])(www\.[^\s<]+)/g, '$1<a href="https://$2">$2</a>'),
         bcc: [commercial.email],
       })
 
