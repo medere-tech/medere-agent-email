@@ -4,7 +4,7 @@ import { jwtVerify } from 'jose'
 const SECRET = new TextEncoder().encode(process.env.NEXTAUTH_SECRET!)
 const COOKIE_NAME = 'medere_session'
 
-const PUBLIC_PATHS = ['/login', '/api/auth']
+const PUBLIC_PATHS = ['/login', '/api/auth', '/api/webhooks', '/api/cron']
 
 export async function middleware(req: NextRequest) {
   // Protection contre CVE-2025-29927
