@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
         subject: sujet,
         html: corps
           .replace(/\n/g, '<br>')
-          // Convertir les liens Markdown [texte](url) en balises <a>
+          // Convertir les liens Markdown [texte](url) en balises ahrefs <a>
           .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, '<a href="$2">$1</a>')
           // Convertir les URLs brutes restantes en balises <a>
           .replace(/(^|[\s<br>])(https?:\/\/[^\s<]+)/g, '$1<a href="$2">$2</a>'),
