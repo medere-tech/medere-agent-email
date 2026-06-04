@@ -3,7 +3,7 @@ import { cookies } from 'next/headers'
 
 const SECRET = new TextEncoder().encode(process.env.NEXTAUTH_SECRET!)
 const COOKIE_NAME = 'medere_session'
-const SESSION_DURATION = 60 * 60 * 24 // 8 heures
+const SESSION_DURATION = 60 * 60 * 24 * 7 // 7 jours
 
 export interface Session {
   email: string
