@@ -26,7 +26,6 @@ export async function POST(req: NextRequest) {
 
         const dejaFaites = await getFormationsDejaFaites(ps.rpps || '', ps.email || '')
 
-
         formationsLiees = await getFormationsUpsell(
           formation.id,
           formation.public,

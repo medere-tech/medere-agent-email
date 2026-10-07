@@ -45,17 +45,17 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
 
   const allResults: Map<string, any> = new Map()
 
-  // Helper to run one search and merge results
+  // Helper to run one search and merge results.
+  // Les erreurs (429, 401, 5xx) ne sont plus avalées : un résultat vide dû à une
+  // panne pousserait le commercial à créer un doublon de contact dans HubSpot.
   const runSearch = async (body: object) => {
-    try {
-      const res = await hs('/crm/v3/objects/contacts/search', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      })
-      for (const r of res.results || []) {
-        if (!allResults.has(r.id)) allResults.set(r.id, r)
-      }
-    } catch { /* ignore partial failures */ }
+    const res = await hs('/crm/v3/objects/contacts/search', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    for (const r of res.results || []) {
+      if (!allResults.has(r.id)) allResults.set(r.id, r)
+    }
   }
 
   const baseProps = ['firstname', 'lastname', 'email', 'jobtitle', 'rpps', 'hs_object_id']
@@ -139,43 +139,6 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
   }))
 }
 
-export async function searchContactsByName(nom: string, prenom?: string): Promise<HSContact[]> {
-  const filterGroups: any[] = []
-
-  if (prenom) {
-    filterGroups.push({
-      filters: [
-        { propertyName: 'lastname', operator: 'CONTAINS_TOKEN', value: nom },
-        { propertyName: 'firstname', operator: 'CONTAINS_TOKEN', value: prenom },
-      ],
-    })
-  }
-
-  filterGroups.push({
-    filters: [{ propertyName: 'lastname', operator: 'CONTAINS_TOKEN', value: nom }],
-  })
-
-  const body = {
-    filterGroups,
-    properties: ['firstname', 'lastname', 'email', 'jobtitle', 'hs_object_id'],
-    limit: 10,
-  }
-
-  const res = await hs('/crm/v3/objects/contacts/search', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
-
-  return (res.results || []).map((r: any) => ({
-    id: r.id,
-    firstname: r.properties.firstname || '',
-    lastname: r.properties.lastname || '',
-    email: r.properties.email || '',
-    specialite: r.properties.jobtitle || '',
-    rpps: r.properties.rpps || '',
-  }))
-}
-
 export interface LogEmailParams {
   contactId: string
   hubspotOwnerId: string
@@ -186,9 +149,9 @@ export interface LogEmailParams {
   fromName: string
 }
 
-// Requires crm.objects.contacts.write scope
-// Gracefully handles missing scope
-export async function logEmailActivity(params: LogEmailParams): Promise<{ success: boolean; id?: string; disabled?: boolean }> {
+// Crée une Note sur la fiche du contact PS (scope requis : crm.objects.notes.write).
+// Ne lève jamais : renvoie success:false en cas d'échec, l'envoi du mail n'est pas bloqué.
+export async function logEmailActivity(params: LogEmailParams): Promise<{ success: boolean; id?: string }> {
   try {
     const noteBody = `📧 <b>Email envoyé à ${params.toEmail}</b><br><br><b>Sujet :</b> ${params.subject}<br><br>---<br><br>${params.body.replace(/\n/g, '<br>')}`
 
@@ -215,14 +178,4 @@ export async function logEmailActivity(params: LogEmailParams): Promise<{ succes
     console.error('[HUBSPOT] Erreur note:', e.message)
     return { success: false }
   }
-}
-
-export async function getOwners(): Promise<{ id: string; email: string; firstName: string; lastName: string }[]> {
-  const res = await hs('/crm/v3/owners?limit=100')
-  return (res.results || []).map((o: any) => ({
-    id: o.id,
-    email: o.email,
-    firstName: o.firstName,
-    lastName: o.lastName,
-  }))
 }

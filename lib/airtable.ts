@@ -1,6 +1,12 @@
 const BASE_ID = process.env.AIRTABLE_BASE_ID!
 const TOKEN = process.env.AIRTABLE_TOKEN!
 
+// Liste des formations proposées à l'étape 2 (getFormationsActives) :
+//   false (comportement actuel, recommandé par Maylis) : formations "Active" avec numéro DPC,
+//         qu'elles aient des sessions à venir ou non.
+//   true  : en plus, uniquement les formations ayant au moins une session qui démarre après aujourd'hui.
+export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
+
 const TABLES = {
   formations: 'tblu6nfUIhTQ1cbgk',
   sessions: 'tblGVEqH7KCo2GlXz',
@@ -9,16 +15,38 @@ const TABLES = {
   commerciaux: 'tblaDpXcgiNZfcJiO',
 }
 
-async function at(path: string) {
+// fresh: true → pas de cache Next. Obligatoire pour toute requête paginée (voir atAll)
+// et pour le cron (les inscriptions doivent être à jour). Sinon, cache de 60 s.
+async function at(path: string, { fresh = false }: { fresh?: boolean } = {}) {
   const res = await fetch(`https://api.airtable.com/v0/${BASE_ID}${path}`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
-    next: { revalidate: 60 },
+    ...(fresh ? { cache: 'no-store' as const } : { next: { revalidate: 60 } }),
   })
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`Airtable ${res.status}: ${err}`)
   }
   return res.json()
+}
+
+// Charge toutes les pages d'une requête (path doit déjà contenir un "?").
+// Jamais de cache, première page comprise : une page 1 servie depuis le cache porte
+// un offset expiré côté Airtable → 422 LIST_RECORDS_ITERATOR_NOT_AVAILABLE sur la page 2.
+async function atAll(path: string): Promise<any[]> {
+  const records: any[] = []
+  let offset: string | undefined
+  do {
+    const offsetParam = offset ? `&offset=${offset}` : ''
+    const data = await at(`${path}${offsetParam}`, { fresh: true })
+    records.push(...(data.records || []))
+    offset = data.offset
+  } while (offset)
+  return records
+}
+
+// Échappe une valeur insérée entre guillemets dans une formule Airtable
+function formulaString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
 export interface Commercial {
@@ -53,11 +81,6 @@ export interface Session {
 }
 
 export async function getCommerciauxActifs(): Promise<Commercial[]> {
-  const params = new URLSearchParams({
-    filterByFormula: '{Statut}="Actif"',
-    'fields[]': 'hubspot_id',
-  })
-  // fetch all fields
   const url = `/${TABLES.commerciaux}?filterByFormula=${encodeURIComponent('{Statut}="Actif"')}&fields[]=hubspot_id&fields[]=email&fields[]=phone&fields[]=slack_user_id&fields[]=hubspot_name`
   const data = await at(url)
   return data.records.map((r: any) => ({
@@ -71,68 +94,27 @@ export async function getCommerciauxActifs(): Promise<Commercial[]> {
 }
 
 export async function getFormationsActives(): Promise<Formation[]> {
-  // ── OPTION A : formations actives avec numéro DPC ET au moins une session future ──
-  // Décommenter ce bloc et commenter le bloc OPTION A pour activer
-  // Étape 1 : formations actives avec numéro DPC — avec pagination
-  /* const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
-  const allFormationRecords: any[] = []
-  let offsetF: string | undefined 
-  do {
-    const offsetParam = offsetF ? `&offset=${offsetF}` : ''
-    const data = await at(
-      `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}${offsetParam}`
-    )
-    allFormationRecords.push(...(data.records || []))
-    offsetF = data.offset
-  } while (offsetF)
-
-  const formations: Formation[] = allFormationRecords.map((r: any) => ({
-    id: r.id,
-    nom: r.fields['Nom de la formation'] || '',
-    numero: String(r.fields["Numéro d'action DPC"] || ''),
-    format: r.fields['Format'] || '',
-    public: r.fields['Public concerné'] || [],
-    statut: 'Active',
-  }))
-
-  // Étape 2 : sessions futures — pagination + sans filtre webflow_id ici
-  const today = new Date().toISOString().split('T')[0]
-  const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
-
-  const allSessionRecords: any[] = []
-  let offsetS: string | undefined
-  do {
-    const offsetParam = offsetS ? `&offset=${offsetS}` : ''
-    const data = await at(
-      `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}${offsetParam}`
-    )
-    allSessionRecords.push(...(data.records || []))
-    offsetS = data.offset
-  } while (offsetS)
-
-  // Étape 3 : formations ayant au moins une session future
-  const avecSessions = new Set<string>(
-    allSessionRecords.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+  // Formations actives avec numéro DPC (voir FORMATIONS_REQUIRE_FUTURE_SESSION en haut du fichier)
+  const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
+  const allFormationRecords = await atAll(
+    `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}`
   )
 
-  return formations.filter((f) => avecSessions.has(f.id))*/
-
-
-  // ── OPTION B : formations actives avec numéro DPC uniquement (recommandé par Maylis) ──
-  // Pour activer : commenter le bloc OPTION B au-dessus et décommenter ce bloc
-  const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
-  const allFormationRecords: any[] = []
-  let offsetF: string | undefined
-  do {
-    const offsetParam = offsetF ? `&offset=${offsetF}` : ''
-    const data = await at(
-      `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}${offsetParam}`
+  let records = allFormationRecords
+  if (FORMATIONS_REQUIRE_FUTURE_SESSION) {
+    // Uniquement les formations liées à au moins une session qui démarre après aujourd'hui
+    const today = new Date().toISOString().split('T')[0]
+    const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
+    const futureSessions = await atAll(
+      `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
     )
-    allFormationRecords.push(...(data.records || []))
-    offsetF = data.offset
-  } while (offsetF)
+    const avecSessions = new Set<string>(
+      futureSessions.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+    )
+    records = allFormationRecords.filter((r: any) => avecSessions.has(r.id))
+  }
 
-  return allFormationRecords.map((r: any) => ({
+  return records.map((r: any) => ({
     id: r.id,
     nom: r.fields['Nom de la formation'] || '',
     numero: String(r.fields["Numéro d'action DPC"] || ''),
@@ -162,15 +144,7 @@ export async function getSessionsByFormation(formationRecordId: string, formatio
   const sort = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
 
   // Paginate through all records
-  const allRecords: any[] = []
-  let offset: string | undefined
-
-  do {
-    const offsetParam = offset ? `&offset=${offset}` : ''
-    const data = await at(`/${TABLES.sessions}?${fields}&${sort}${offsetParam}`)
-    allRecords.push(...(data.records || []))
-    offset = data.offset
-  } while (offset)
+  const allRecords = await atAll(`/${TABLES.sessions}?${fields}&${sort}`)
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -218,81 +192,94 @@ export async function getSessionsByFormation(formationRecordId: string, formatio
 
 export async function getFormationsDejaFaites(rpps: string, email: string): Promise<string[]> {
   // Returns formation record IDs already completed by this PS
-
-  if (!rpps && !email) {
-    return []
-  }
-
+  // Non bloquant pour l'upsell : en cas d'erreur, on n'exclut rien.
   try {
-    let rppsValue = rpps
-
-    if (!rppsValue && email) {
-      const formula = encodeURIComponent(`{email}="${email}"`)
-      const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`)
-      if (data.records?.length) {
-        rppsValue = data.records[0].fields['RPPS'] || ''
-      } else {
-      }
-    }
-
-    if (!rppsValue) {
-      return []
-    }
-
-    
-    const inscFormula = encodeURIComponent(`FIND("${rppsValue}", ARRAYJOIN({RPPS}, ","))`)
-    const inscData = await at(
-      `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
-    )
-
-    const inscriptions = inscData.records || []
-    console.log('[UPSELL] Inscriptions trouvées:', inscriptions.length)
-
-    if (!inscriptions.length) {
-      console.log('[UPSELL] Aucune inscription → retourne []')
-      return []
-    }
-
-    const sessionIds: string[] = inscriptions
-      .flatMap((r: any) => r.fields['session_id'] || [])
-      .filter(Boolean)
-
-    
-
-    if (!sessionIds.length) {
-      return []
-    }
-
-    const allSessions: any[] = []
-    let offset: string | undefined
-    do {
-      const offsetParam = offset ? `&offset=${offset}` : ''
-      const data = await at(
-        `/${TABLES.sessions}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}${offsetParam}`
-      )
-      allSessions.push(...(data.records || []))
-      offset = data.offset
-    } while (offset)
-
-    console.log('[UPSELL] Total sessions chargées:', allSessions.length)
-
-    const matchingSessions = allSessions.filter((r: any) => {
-      const sid = r.fields['session_id']
-      return sid && sessionIds.includes(sid)
-    })
-
-
-    const formationIds: string[] = matchingSessions
-      .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
-      .filter(Boolean)
-
-    const unique = Array.from(new Set(formationIds))
-
-    return unique
+    return await fetchFormationsDejaFaites(rpps, email)
   } catch (e) {
     console.error('[UPSELL] Erreur dans getFormationsDejaFaites:', e)
     return []
   }
+}
+
+// Version qui lève les erreurs Airtable (utilisée telle quelle par le cron).
+async function fetchFormationsDejaFaites(
+  rpps: string,
+  email: string,
+  opts: { fresh?: boolean } = {}
+): Promise<string[]> {
+  if (!rpps && !email) {
+    return []
+  }
+
+  let rppsValue = rpps
+
+  // Pas de RPPS sur le contact HubSpot → on le retrouve via la table Clients
+  if (!rppsValue && email) {
+    const formula = encodeURIComponent(`{email}="${formulaString(email)}"`)
+    const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`, opts)
+    if (data.records?.length) {
+      rppsValue = data.records[0].fields['RPPS'] || ''
+    }
+  }
+
+  if (!rppsValue) {
+    return []
+  }
+
+  const inscFormula = encodeURIComponent(`FIND("${formulaString(String(rppsValue))}", ARRAYJOIN({RPPS}, ","))`)
+  const inscriptions = await atAll(
+    `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
+  )
+
+  if (!inscriptions.length) {
+    return []
+  }
+
+  const sessionIds: string[] = inscriptions
+    .flatMap((r: any) => r.fields['session_id'] || [])
+    .filter(Boolean)
+
+  if (!sessionIds.length) {
+    return []
+  }
+
+  const allSessions = await atAll(
+    `/${TABLES.sessions}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
+  )
+
+  const matchingSessions = allSessions.filter((r: any) => {
+    const sid = r.fields['session_id']
+    return sid && sessionIds.includes(sid)
+  })
+
+  // Dans la table Sessions, "Numéro d'action DPC" est un champ lié → IDs de records formation
+  const formationIds: string[] = matchingSessions
+    .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+    .filter(Boolean)
+
+  return Array.from(new Set(formationIds))
+}
+
+// Le PS est-il inscrit à une session de la formation portant ce numéro DPC ?
+// Lève une erreur si Airtable ne répond pas correctement (le cron décide quoi faire).
+export async function isPsInscritAFormation(
+  rpps: string,
+  email: string,
+  formationNumero: string
+): Promise<boolean> {
+  if (!formationNumero) return false
+
+  const dejaFaites = await fetchFormationsDejaFaites(rpps, email, { fresh: true })
+  if (!dejaFaites.length) return false
+
+  // Numéro DPC → record ID(s) de la formation (la relance ne stocke que le numéro)
+  // &"" force la comparaison en texte, que le champ soit de type nombre ou texte
+  const formula = encodeURIComponent(`({Numéro d'action DPC}&"")="${formulaString(String(formationNumero))}"`)
+  const formations = await atAll(
+    `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
+  )
+
+  return formations.some((f: any) => dejaFaites.includes(f.id))
 }
 
 export interface FormationUpsell {
@@ -318,7 +305,8 @@ export async function getFormationsUpsell(
   const formulaFormations = encodeURIComponent(
     `AND({Statut de la formation}="Active", OR(${orConditions}))`
   )
-  const formationsData = await at(
+  // Paginé (auparavant tronqué silencieusement au-delà de 100 formations)
+  const formationsRecords = await atAll(
     `/${TABLES.formations}?filterByFormula=${formulaFormations}` +
     `&fields[]=${encodeURIComponent('Nom de la formation')}` +
     `&fields[]=${encodeURIComponent("Numéro d'action DPC")}` +
@@ -329,7 +317,7 @@ export async function getFormationsUpsell(
 
   // Map rapide formation_id → metadata
   const formationsMap = new Map<string, { nom: string; format: string; url_webflow: string }>()
-  for (const r of formationsData.records || []) {
+  for (const r of formationsRecords) {
     formationsMap.set(r.id, {
       nom: r.fields['Nom de la formation'] || '',
       format: r.fields['Format'] || '',
@@ -344,7 +332,7 @@ export async function getFormationsUpsell(
         if (id === formationIdCourante) return false
         if (dejaFaites.includes(id)) return false
         if (specialitePS) {
-          const rec = formationsData.records.find((r: any) => r.id === id)
+          const rec = formationsRecords.find((r: any) => r.id === id)
           const publics: string[] = rec?.fields['Public concerné'] || []
           // On normalise tirets et espaces avant de comparer
           const normalize = (s: string) => s.toLowerCase().replace(/[-\s]+/g, ' ').trim()
@@ -371,16 +359,9 @@ export async function getFormationsUpsell(
     `fields[]=${encodeURIComponent("Numéro d'action DPC")}`,
   ].join('&')
 
-  const futureSessions: any[] = []
-  let offset: string | undefined
-  do {
-    const offsetParam = offset ? `&offset=${offset}` : ''
-    const data = await at(
-      `/${TABLES.sessions}?filterByFormula=${formulaSessions}&${sessionFields}&${sortParam}${offsetParam}`
-    )
-    futureSessions.push(...(data.records || []))
-    offset = data.offset
-  } while (offset)
+  const futureSessions = await atAll(
+    `/${TABLES.sessions}?filterByFormula=${formulaSessions}&${sessionFields}&${sortParam}`
+  )
 
   // ── Étape 3 : pour chaque formation éligible, trouver la prochaine session disponible ──
   // Map<formationId, prochaine_date_ISO>
@@ -416,26 +397,4 @@ export async function getFormationsUpsell(
     })
 
   return candidates
-}
-
-// Kept for backward compatibility — not used in upsell anymore
-export async function getFormationsParPublic(publicConcerne: string[]): Promise<Formation[]> {
-  if (!publicConcerne.length) return []
-  const orConditions = publicConcerne
-    .map((p) => `FIND("${p}", ARRAYJOIN({Public concerné}, ","))`)
-    .join(',')
-  const formula = encodeURIComponent(
-    `AND({Statut de la formation}="Active", OR(${orConditions}))`
-  )
-  const data = await at(
-    `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}`
-  )
-  return data.records.map((r: any) => ({
-    id: r.id,
-    nom: r.fields['Nom de la formation'] || '',
-    numero: String(r.fields["Numéro d'action DPC"] || ''),
-    format: r.fields['Format'] || '',
-    public: r.fields['Public concerné'] || [],
-    statut: 'Active',
-  }))
 }

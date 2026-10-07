@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { isPsInscritAFormation } from '@/lib/airtable'
 
 export async function GET(req: NextRequest) {
-  // Verify cron secret
+  // Verify cron secret. Sans CRON_SECRET, la valeur attendue deviendrait
+  // "Bearer undefined" : n'importe qui pourrait déclencher le cron.
+  if (!process.env.CRON_SECRET) {
+    console.error('[CRON] CRON_SECRET manquant — exécution refusée')
+    return NextResponse.json({ error: 'Configuration serveur invalide (CRON_SECRET manquant)' }, { status: 500 })
+  }
   const auth = req.headers.get('authorization')
   if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -20,19 +26,24 @@ export async function GET(req: NextRequest) {
     
     // Scan all relance keys
     const keys = await kv.keys('relance:*')
-    console.log('[CRON] Date today:', today)
-    console.log('[CRON] Clés trouvées:', keys.length, keys)
 
     for (const key of keys) {
       const item = await kv.get<any>(key)
-      console.log('[CRON] Item:', key, '→ relance_at:', item?.relance_at, '| match:', item?.relance_at === today)
       if (!item || item.relance_at !== today) continue
 
       // Send Slack DM to the commercial
       // Vérifier si le PS est déjà inscrit dans Airtable
       try {
-        const dejáInscrit = await checkInscriptionAirtable(item.ps_rpps, item.ps_email, item.formation_numero)
-        if (dejáInscrit) {
+        let dejaInscrit = false
+        try {
+          dejaInscrit = await isPsInscritAFormation(item.ps_rpps, item.ps_email, item.formation_numero)
+        } catch (e: any) {
+          // Airtable indisponible : on relance quand même (mieux vaut trop que pas assez),
+          // mais l'erreur est tracée au lieu d'être avalée.
+          console.error('[CRON] Vérification inscription impossible pour', key, ':', e.message)
+          errors.push(`${key}: vérification inscription impossible (${e.message}) — relance envoyée quand même`)
+        }
+        if (dejaInscrit) {
           await kv.del(key) // Supprimer silencieusement — plus besoin de relancer
           continue
         }
@@ -91,54 +102,6 @@ function daysAgo(iso: string): string {
     const days = Math.round((Date.now() - new Date(iso).getTime()) / 86400000)
     return `il y a ${days} jour${days > 1 ? 's' : ''}`
   } catch { return 'récemment' }
-}
-
-async function checkInscriptionAirtable(rpps: string, email: string, formationNumero: string): Promise<boolean> {
-  const BASE_ID = process.env.AIRTABLE_BASE_ID!
-  const TOKEN = process.env.AIRTABLE_TOKEN!
-  const SESSIONS_TABLE = 'tblGVEqH7KCo2GlXz'
-  const INSCRIPTIONS_TABLE = 'tblTOJHEwCQhibcMM'
-
-  try {
-    const identifier = rpps || email
-    if (!identifier) return false
-
-    // Étape 1 : chercher les inscriptions du PS par RPPS
-    const formula = encodeURIComponent(`FIND("${identifier}", ARRAYJOIN({RPPS}, ","))`)
-    const res = await fetch(
-      `https://api.airtable.com/v0/${BASE_ID}/${INSCRIPTIONS_TABLE}?filterByFormula=${formula}&fields[]=${encodeURIComponent('session_id')}`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    )
-    const data = await res.json()
-    const inscriptions = data.records || []
-    if (!inscriptions.length) return false
-
-    // Étape 2 : récupérer les session_ids des inscriptions
-    const sessionIds: string[] = inscriptions
-      .flatMap((r: any) => r.fields['session_id'] || [])
-      .filter(Boolean)
-    if (!sessionIds.length) return false
-
-    // Étape 3 : vérifier si l'une de ces sessions appartient à la formation concernée
-    const sessionsRes = await fetch(
-      `https://api.airtable.com/v0/${BASE_ID}/${SESSIONS_TABLE}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`,
-      { headers: { Authorization: `Bearer ${TOKEN}` } }
-    )
-    const sessionsData = await sessionsRes.json()
-    const allSessions = sessionsData.records || []
-
-    const matchingSessions = allSessions.filter((r: any) =>
-      sessionIds.includes(r.fields['session_id'])
-    )
-
-    // Vérifie si le numéro de formation correspond
-    return matchingSessions.some((r: any) => {
-      const nums: string[] = r.fields["Numéro d'action DPC"] || []
-      return nums.some((n) => String(n) === String(formationNumero))
-    })
-  } catch {
-    return false // En cas d'erreur, on relance quand même — mieux vaut trop que pas assez
-  }
 }
 
 async function sendSlackDM(userId: string, text: string) {

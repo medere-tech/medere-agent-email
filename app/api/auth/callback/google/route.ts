@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createSession } from '@/lib/auth'
 
 export async function GET(req: NextRequest) {
+  if (!process.env.NEXTAUTH_SECRET) {
+    console.error('[AUTH] NEXTAUTH_SECRET manquant — impossible de créer une session')
+    return NextResponse.json({ error: 'Configuration serveur invalide (NEXTAUTH_SECRET manquant)' }, { status: 500 })
+  }
+
   const { searchParams } = new URL(req.url)
   const code = searchParams.get('code')
   const error = searchParams.get('error')

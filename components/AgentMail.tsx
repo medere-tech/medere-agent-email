@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Commercial { id: string; hubspot_id: string; name: string; email: string; phone: string; slack_user_id: string }
@@ -9,6 +9,23 @@ interface Session { id: string; session_id: string; numero: string; date_debut: 
 interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6
+
+// fetch + contrôle de res.ok. Lève une erreur lisible si la réponse est en erreur
+// ou n'est pas du JSON (ex. session expirée : le middleware redirige vers /login).
+async function fetchJson(url: string, init?: RequestInit) {
+  const res = await fetch(url, init)
+  if (res.redirected && new URL(res.url).pathname === '/login') {
+    throw new Error('Session expirée, reconnecte-toi.')
+  }
+  let data: any
+  try {
+    data = await res.json()
+  } catch {
+    throw new Error(`Réponse invalide du serveur (${res.status})`)
+  }
+  if (!res.ok) throw new Error(data?.error || `Erreur serveur (${res.status})`)
+  return data
+}
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 const Icons = {
@@ -72,6 +89,12 @@ const Icons = {
   Loader: () => (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="animate-spin">
       <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" strokeDasharray="28" strokeDashoffset="10"/>
+    </svg>
+  ),
+  Logout: () => (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path d="M6 2.5H3.5C2.95 2.5 2.5 2.95 2.5 3.5V12.5C2.5 13.05 2.95 13.5 3.5 13.5H6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      <path d="M10.5 11L13.5 8L10.5 5M13.5 8H6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
     </svg>
   ),
 }
@@ -214,6 +237,10 @@ export default function AgentMail() {
   // Mail
   const [mailSujet, setMailSujet] = useState('')
   const [mailCorps, setMailCorps] = useState('')
+  // Clé d'idempotence de l'envoi : créée à l'arrivée en étape 5, réutilisée pour
+  // tout renvoi de ce mail (double clic, timeout) → Resend ne l'envoie qu'une fois.
+  const [idempotencyKey, setIdempotencyKey] = useState('')
+  const sendingRef = useRef(false)
 
   // UI states
   const [loading, setLoading] = useState(false)
@@ -221,23 +248,24 @@ export default function AgentMail() {
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [contactSearch, setContactSearch] = useState('')
   const [contactSearching, setContactSearching] = useState(false)
+  const [contactSearchFailed, setContactSearchFailed] = useState(false)
   const [sendResult, setSendResult] = useState<any>(null)
   const [error, setError] = useState('')
 
   // Load commerciaux on mount
   useEffect(() => {
-    fetch('/api/commerciaux')
-      .then((r) => r.json())
+    fetchJson('/api/commerciaux')
       .then((d) => setCommerciauxList(d.commerciaux || []))
+      .catch((e) => setError(`Impossible de charger les commerciaux : ${e.message}`))
   }, [])
 
   // Load formations when step 2
   useEffect(() => {
     if (step === 2 && formations.length === 0) {
       setLoadingFormations(true)
-      fetch('/api/formations')
-        .then((r) => r.json())
+      fetchJson('/api/formations')
         .then((d) => setFormationsList(d.formations || []))
+        .catch((e) => setError(`Impossible de charger les formations : ${e.message}`))
         .finally(() => setLoadingFormations(false))
     }
   }, [step, formations.length])
@@ -248,20 +276,24 @@ export default function AgentMail() {
     setLoadingSessions(true)
     setSessionsList([])
     setSelectedSessions([])
-    fetch(`/api/sessions?formationId=${formation.id}&format=${encodeURIComponent(formation.format)}`)
-      .then((r) => r.json())
+    fetchJson(`/api/sessions?formationId=${formation.id}&format=${encodeURIComponent(formation.format)}`)
       .then((d) => setSessionsList(d.sessions || []))
+      .catch((e) => setError(`Impossible de charger les sessions : ${e.message}`))
       .finally(() => setLoadingSessions(false))
   }, [formation])
 
   // Contact search debounce
   useEffect(() => {
+    setContactSearchFailed(false)
     if (contactSearch.length < 2) { setContactResults([]); return }
     const t = setTimeout(() => {
       setContactSearching(true)
-      fetch(`/api/contact-search?q=${encodeURIComponent(contactSearch)}`)
-        .then((r) => r.json())
+      fetchJson(`/api/contact-search?q=${encodeURIComponent(contactSearch)}`)
         .then((d) => setContactResults(d.contacts || []))
+        .catch(() => {
+          setContactResults([])
+          setContactSearchFailed(true)
+        })
         .finally(() => setContactSearching(false))
     }, 350)
     return () => clearTimeout(t)
@@ -278,7 +310,7 @@ export default function AgentMail() {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/generate', {
+      const data = await fetchJson('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -301,10 +333,9 @@ export default function AgentMail() {
           },
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
       setMailSujet(data.sujet)
       setMailCorps(data.corps)
+      setIdempotencyKey(crypto.randomUUID())
       setStep(5)
     } catch (e: any) {
       setError(e.message)
@@ -315,10 +346,13 @@ export default function AgentMail() {
 
   const handleSend = async () => {
     if (!commercial || !psContact || !mailSujet || !mailCorps) return
+    // Verrou synchrone : `loading` (state) n'est appliqué qu'au re-render suivant
+    if (sendingRef.current) return
+    sendingRef.current = true
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/send', {
+      const data = await fetchJson('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -339,15 +373,15 @@ export default function AgentMail() {
           formation: { nom: formation!.nom, numero: formation!.numero },
           sujet: mailSujet,
           corps: mailCorps,
+          idempotencyKey,
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
       setSendResult(data)
       setStep(6)
     } catch (e: any) {
       setError(e.message)
     } finally {
+      sendingRef.current = false
       setLoading(false)
     }
   }
@@ -362,6 +396,7 @@ export default function AgentMail() {
     setContactResults([])
     setMailSujet('')
     setMailCorps('')
+    setIdempotencyKey('')
     setSendResult(null)
     setError('')
   }
@@ -386,14 +421,25 @@ export default function AgentMail() {
       <div className="w-full max-w-xl">
         {/* Header */}
         <div className="mb-6">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-6 h-6 flex items-center justify-center">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <rect x="2" y="3" width="8" height="18" rx="4" fill="#111111"/>
-                <rect x="14" y="3" width="8" height="18" rx="4" fill="#111111"/>
-              </svg>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 flex items-center justify-center">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="2" y="3" width="8" height="18" rx="4" fill="#111111"/>
+                  <rect x="14" y="3" width="8" height="18" rx="4" fill="#111111"/>
+                </svg>
+              </div>
+              <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Médéré</span>
             </div>
-            <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Médéré</span>
+            <form action="/api/auth/logout" method="post">
+              <button
+                type="submit"
+                className="flex items-center gap-1.5 px-3 py-2 border border-zinc-200 text-xs font-medium text-zinc-600 rounded-lg hover:bg-white transition-colors"
+              >
+                <Icons.Logout />
+                Se déconnecter
+              </button>
+            </form>
           </div>
           <h1 className="text-xl font-semibold text-zinc-900">Agent Mail DPC</h1>
           <p className="text-sm text-zinc-500 mt-0.5">Génère et envoie un mail personnalisé en moins de 60 secondes</p>
@@ -591,7 +637,14 @@ export default function AgentMail() {
                 </div>
               )}
 
-              {contactSearch.length >= 2 && !contactSearching && contactResults.length === 0 && !psContact && (
+              {contactSearchFailed && !contactSearching && !psContact && (
+                <div className="p-3 bg-red-50 border border-red-100 rounded-lg flex items-start gap-2 text-sm text-red-700">
+                  <Icons.Warning />
+                  <span>HubSpot indisponible, ne crée pas le contact. Réessaie dans quelques instants.</span>
+                </div>
+              )}
+
+              {contactSearch.length >= 2 && !contactSearching && !contactSearchFailed && contactResults.length === 0 && !psContact && (
                 <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg flex items-start gap-2 text-sm text-amber-700">
                   <Icons.Warning />
                   <span>Aucun contact trouvé dans HubSpot. Vérifie l'orthographe ou crée le contact dans HubSpot d'abord.</span>
@@ -735,8 +788,7 @@ export default function AgentMail() {
                   icon={<Icons.Mail />}
                   label="Activité HubSpot"
                   ok={sendResult.hubspot_logged}
-                  disabled={sendResult.hubspot_disabled}
-                  detail={sendResult.hubspot_disabled ? 'Scope crm.objects.contacts.write requis' : sendResult.hubspot_logged ? 'Loggé sur les "Notes" du commercial' : 'Erreur'}
+                  detail={sendResult.hubspot_logged ? 'Note ajoutée sur la fiche du PS' : 'Erreur'}
                 />
                 <StatusRow
                   icon={<Icons.Calendar />}
@@ -747,14 +799,9 @@ export default function AgentMail() {
               </div>
 
               {/* Pending actions */}
-              {(sendResult.hubspot_disabled || !sendResult.relance_stored) && (
+              {!sendResult.relance_stored && (
                 <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-700 space-y-1">
-                  {sendResult.hubspot_disabled && (
-                    <p>⚠️ <strong>HubSpot log :</strong> Ajoute le scope <code>crm.objects.contacts.write</code> à ta private app + active <code>HS_WRITE_SCOPE_ENABLED=true</code> dans les env vars.</p>
-                  )}
-                  {!sendResult.relance_stored && (
-                    <p>⚠️ <strong>Relance J+3 :</strong> Configure Vercel KV dans le dashboard Vercel et ajoute les env vars <code>KV_REST_API_URL</code> + <code>KV_REST_API_TOKEN</code>.</p>
-                  )}
+                  <p>⚠️ <strong>Relance J+3 :</strong> Configure Vercel KV dans le dashboard Vercel et ajoute les env vars <code>KV_REST_API_URL</code> + <code>KV_REST_API_TOKEN</code>.</p>
                 </div>
               )}
 
@@ -777,8 +824,8 @@ export default function AgentMail() {
   )
 }
 
-function StatusRow({ icon, label, ok, disabled, detail }: {
-  icon: React.ReactNode; label: string; ok: boolean; disabled?: boolean; detail?: string
+function StatusRow({ icon, label, ok, detail }: {
+  icon: React.ReactNode; label: string; ok: boolean; detail?: string
 }) {
   return (
     <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-100 last:border-0 bg-white">
@@ -788,7 +835,7 @@ function StatusRow({ icon, label, ok, disabled, detail }: {
       </div>
       <div className="flex items-center gap-1.5">
         {detail && <span className="text-[11px] text-zinc-400">{detail}</span>}
-        <div className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-green-500' : disabled ? 'bg-amber-400' : 'bg-red-400'}`} />
+        <div className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-green-500' : 'bg-red-400'}`} />
       </div>
     </div>
   )

@@ -9,6 +9,7 @@ export async function GET(req: NextRequest) {
     const contacts = await searchContacts(q)
     return NextResponse.json({ contacts })
   } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    console.error('[CONTACT-SEARCH] HubSpot indisponible:', e.message)
+    return NextResponse.json({ error: 'HubSpot indisponible', detail: e.message }, { status: 502 })
   }
 }

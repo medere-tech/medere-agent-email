@@ -94,6 +94,12 @@ const Icons = {
       <path d="M4 6L8 10L12 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
     </svg>
   ),
+  Logout: () => (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path d="M6 2.5H3.5C2.95 2.5 2.5 2.95 2.5 3.5V12.5C2.5 13.05 2.95 13.5 3.5 13.5H6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      <path d="M10.5 11L13.5 8L10.5 5M13.5 8H6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  ),
 }
 
 // ─── Statut Badge — monochrome uniquement ─────────────────────────────────────
@@ -237,6 +243,15 @@ export default function SuiviPage() {
               </span>
               {refreshing ? 'Actualisation…' : 'Actualiser'}
             </button>
+            <form action="/api/auth/logout" method="post">
+              <button
+                type="submit"
+                className="flex items-center gap-1.5 px-3 py-2 border border-zinc-200 text-xs font-medium text-zinc-600 rounded-lg hover:bg-white transition-colors"
+              >
+                <Icons.Logout />
+                Se déconnecter
+              </button>
+            </form>
           </div>
         </div>
 
