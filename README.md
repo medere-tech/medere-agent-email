@@ -99,7 +99,9 @@ medere-agent-email/
 ├── docs/
 │   └── TESTS.md                          # Protocole de test complet
 ├── scripts/
-│   ├── migrate-kv.ts                     # Export / migration v2 / restauration des données KV
+│   ├── dedupe-hubspot-notes.ts           # Archive les Notes HubSpot ouvert / cliqué en double
+│   ├── migrate-kv.ts                     # Export / migration v2 / vérification / restauration des données KV
+│   ├── purge-test-sends.ts               # Supprime du KV les envois au PS de test
 │   └── seed-test.ts                      # Crée / supprime les données de test (base KV de test)
 ├── backups/                              # Exports KV (migrate-kv.ts --export) — ignoré par git
 ├── middleware.ts                         # Protection des routes + CVE-2025-29927
@@ -345,11 +347,11 @@ Libellés affichés (la valeur stockée dans `email_track.statut` est entre pare
 - **Envoyé** (`envoyé`) : mail transmis via Resend
 - **Reçu** (`délivré`) : accepté par le serveur du PS (`email.delivered`)
 - **Ouvert** (`ouvert`) : le PS a ouvert le mail
-- **Lien cliqué** (`cliqué`) : le PS a cliqué un lien (clic non automatique)
+- **Cliqué** (`cliqué`) : le PS a cliqué dans le mail (clic non automatique)
 - **Adresse invalide** (`bounce`) : adresse rejetée (`email.bounced`) — état final
-- **Signalé comme indésirable** (`plainte`) : le PS a signalé le mail comme spam (`email.complained`) — état final
+- **Indésirable** (`plainte`) : le PS a signalé le mail comme spam (`email.complained`) — état final
 
-Le statut est **monotone** (envoyé < délivré < ouvert < cliqué) : un événement plus faible ne le fait jamais redescendre. **Bounce et plainte sont prioritaires** sur tous les autres (une plainte prime sur un bounce). Les dates `first_*` sont écrites une seule fois ; `last_opened_at`, `open_count` et `click_count` suivent chaque ouverture et clic humain. Seule exception à la monotonie : un clic reclassé automatique après coup (voir ci-dessous) peut faire redescendre « Lien cliqué » au statut précédent.
+Le statut est **monotone** (envoyé < délivré < ouvert < cliqué) : un événement plus faible ne le fait jamais redescendre. **Bounce et plainte sont prioritaires** sur tous les autres (une plainte prime sur un bounce). Les dates `first_*` sont écrites une seule fois ; `last_opened_at`, `open_count` et `click_count` suivent chaque ouverture et clic humain. Seule exception à la monotonie : un clic reclassé automatique après coup (voir ci-dessous) peut faire redescendre « Cliqué » au statut précédent.
 
 ### Ouvertures et clics automatiques
 **Par défaut, toute ouverture et tout clic est humain** : le commercial envoie souvent le mail pendant l'appel et le PS l'ouvre dans la seconde — ce sont les meilleurs signaux. Un événement n'est classé « automatique » (antivirus, filtre de sécurité de l'établissement) que sur des signes fiables.
@@ -369,7 +371,7 @@ Règle appliquée aux clics (constantes dans `lib/config.ts`) :
 **Limites connues :**
 - Les ouvertures déclenchées sans lecture (Apple Mail Privacy Protection, proxys qui préchargent les images) restent comptées comme des ouvertures : Resend ne fournit rien pour les distinguer.
 - Un antivirus qui clique **un seul** lien avec un navigateur ordinaire n'est pas détecté.
-- Si les webhooks d'une même rafale arrivent à plus de 3 secondes d'écart, la Note « Lien cliqué » peut être créée avant le reclassement : les compteurs et le statut sont corrigés, mais la Note reste (journal : « clic(s) précédent(s) reclassé(s) automatique(s) »).
+- Si les webhooks d'une même rafale arrivent à plus de 3 secondes d'écart, la Note « Email cliqué » peut être créée avant le reclassement : les compteurs et le statut sont corrigés, mais la Note reste (journal : « clic(s) précédent(s) reclassé(s) automatique(s) »).
 - Un vrai PS qui clique deux liens différents en moins de 2 secondes est classé automatique (cas très improbable).
 
 ### Stats
@@ -391,22 +393,44 @@ Les envois sont conservés **3 ans** : constante `RETENTION_DAYS = 1095` en haut
 ### Migration des données (schéma v2) — à faire une fois après le déploiement
 Le code fonctionne **avant et après** la migration : avant, les anciennes entrées restent lisibles et les stats sont calculées sur les entrées ; les événements webhook mettent à jour une ancienne entrée sans toucher aux compteurs (la migration la comptera, d'où l'absence de double comptage). La migration reconstruit compteurs et index à partir des `email_track` existants et reprend les clés `relance:*`.
 
-Sur la base de **production**, juste après le déploiement et **avant le prochain cron de 8h UTC** (le nouveau cron lit `relances_due`) :
+**Procédure de déploiement des données**, sur la base de **production**, juste après le déploiement et **avant le prochain cron de 8h UTC** (le nouveau cron lit `relances_due`). Chaque script affiche d'abord un rapport sans rien modifier : le lire avant de passer à l'écriture.
 ```bash
 H=<hôte de la base KV de production>                                   # ex. xxx.upstash.io, vérifié contre KV_REST_API_URL
-node scripts/migrate-kv.ts --host=$H --export                         # 1. sauvegarde complète (backups/kv-export-<hôte>-<date>.json)
-node scripts/migrate-kv.ts --host=$H --dry-run                        # 2. rapport, aucune écriture
-node scripts/migrate-kv.ts --host=$H                                  # 3. migration (refusée sans export de moins d'une heure)
-node scripts/migrate-kv.ts --host=$H --verify                         # 4. contrôle : chaque fait compté une seule fois (aucune écriture)
-# retour arrière si besoin :
+
+# 1. Sauvegarde complète (backups/kv-export-<hôte>-<date>.json) — obligatoire : les étapes 2 et 3 la refusent si elle a plus d'une heure
+node scripts/migrate-kv.ts --host=$H --export
+
+# 2. Suppression des envois de test (PS = fiche de test 18421683158 ou dethie@medere.fr), faits au nom de vrais commerciaux
+node scripts/purge-test-sends.ts --host=$H                            #    rapport
+node scripts/purge-test-sends.ts --host=$H --apply                    #    suppression
+
+# 3. Migration v2 (compteurs, index, reprise des anciennes relances)
+node scripts/migrate-kv.ts --host=$H --dry-run                        #    rapport (valider les noms « À VALIDER »)
+node scripts/migrate-kv.ts --host=$H                                  #    migration
+
+# 4. Contrôle : chaque fait compté une seule fois (aucune écriture, exit 1 au moindre écart)
+node scripts/migrate-kv.ts --host=$H --verify
+
+# 5. Notes HubSpot « Email ouvert » / « Email cliqué » en double
+node scripts/dedupe-hubspot-notes.ts --host=$H                        #    rapport par contact (lire les cas ambigus)
+node scripts/dedupe-hubspot-notes.ts --host=$H --apply                #    archivage des doublons
+
+# Retour arrière du KV si besoin (étapes 2 à 4) :
 node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json            # plan, aucune écriture
 node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json --confirm  # restauration
 ```
+Avant l'étape 1 : ajouter `email.delivered`, `email.bounced` et `email.complained` sur l'endpoint du webhook dans Resend (voir « Webhooks Resend »). Les Notes HubSpot archivées à l'étape 5 restent récupérables 90 jours dans la corbeille HubSpot ; la restauration du KV ne les concerne pas.
 - Node ≥ 22.18 (le script TypeScript s'exécute sans compilation ni dépendance).
 - `.env.local` (ou `ENV_FILE=<fichier>`) doit contenir les `KV_REST_API_*` de la base visée, et `AIRTABLE_*`.
 - **Idempotente** : une entrée déjà migrée est ignorée ; relancer la commande ne change rien.
-- **Une seule entrée par mail** : la clé est le `resend_id` du mail. Chaque fait (reçu, ouvert, lien cliqué…) est compté une seule fois grâce aux marqueurs `counted_*`, même si des webhooks arrivent pendant la migration (testé). `--verify` recalcule les compteurs attendus à partir de ces marqueurs, les compare aux `stats:day:*` et contrôle la cohérence fait / comptage ; il sort en erreur au moindre écart.
+- **Une seule entrée par mail** : la clé est le `resend_id` du mail. Chaque fait (reçu, ouvert, cliqué…) est compté une seule fois grâce aux marqueurs `counted_*`, même si des webhooks arrivent pendant la migration (testé). `--verify` recalcule les compteurs attendus à partir de ces marqueurs, les compare aux `stats:day:*` et contrôle la cohérence fait / comptage ; il sort en erreur au moindre écart.
 - Deux mails réellement envoyés en double (avant l'idempotence) restent **deux** entrées : aucun mail envoyé n'est supprimé ni fusionné.
+
+### Envois de test — `scripts/purge-test-sends.ts`
+Supprime du KV les envois dont le PS est la fiche de test (`18421683158`) ou l'adresse de test (`dethie@medere.fr`), faits au nom de vrais commerciaux pendant les essais (constantes `TEST_CONTACT_IDS` / `TEST_EMAILS` en haut du script).
+- Supprimés pour chaque envoi : `email_track`, `email_body`, `email_clicks`, `send_result`, verrous `hubspot_note:*`, entrées de `emails_index`, `idx:commercial:*`, `idx:contact:*`, `relances_due` ; si l'envoi avait déjà été compté (entrée v2), sa contribution aux `stats:day:*` est retirée dans le même script atomique (`--verify` reste à 0 écart). Les anciennes clés `relance:*` du PS de test sont aussi supprimées.
+- **Jamais touchés** : les envois vers d'autres PS, les Notes HubSpot.
+- Garde-fous identiques à `migrate-kv.ts` : `--host` obligatoire, rapport par défaut, `--apply` pour écrire, refus sans export de moins d'une heure.
 
 ### Notes HubSpot en double — `scripts/dedupe-hubspot-notes.ts`
 Avant la phase 1, le webhook créait une Note « Email ouvert » / « Email cliqué » à chaque événement. Le script archive les doublons (à lancer après la migration) :
@@ -416,7 +440,7 @@ node scripts/dedupe-hubspot-notes.ts --host=$H --apply         # archive les dou
 # options : --contact=<id> (un seul contact), --subject-prefix=<texte> (sujets commençant par…)
 ```
 - Contacts examinés : ceux présents dans le KV (contacts réellement écrits par l'agent). `.env.local` doit contenir `HUBSPOT_TOKEN` et les `KV_REST_API_*` de la base visée.
-- **Seules les Notes au format exact de l'agent** sont prises en compte (« 👁️ Email ouvert le… », « 🖱️ Email cliqué le… » ou « 🖱️ Lien cliqué le… », suivies de « Sujet : » et « Commercial : »). Les Notes saisies à la main et les Notes « Email envoyé » ne sont jamais touchées.
+- **Seules les Notes au format exact de l'agent** sont prises en compte (« 👁️ Email ouvert le… », « 🖱️ Email cliqué le… », ou « 🖱️ Lien cliqué le… » créé pendant les tests, suivies de « Sujet : » et « Commercial : »). Les Notes saisies à la main et les Notes « Email envoyé » ne sont jamais touchées.
 - Regroupement par contact, type, sujet et commercial. S'il existe **exactement un** mail correspondant dans le KV, la Note la plus ancienne est gardée et les autres sont archivées (corbeille HubSpot, récupérables 90 jours). Sinon (0 ou plusieurs mails avec ce sujet) : cas **ambigu**, rien n'est touché, signalé dans le rapport.
 - Le script ne modifie jamais le KV.
 - **Correspondance nom → email** : les anciens envois ne stockaient que le nom du commercial. Un nom n'est rattaché à un email que s'il correspond à **une seule** fiche Commerciaux **et** que le prénom de la fiche correspond à l'email (« Sarah Smadja » → `sarah.s@`). Sinon, la clé est `nom:{slug}` et le cas est listé dans le rapport `--dry-run` (ex. « Loane Deluge » dont la fiche porte `justine.m@`).
@@ -440,7 +464,7 @@ https://medere-agent-email-dpc.vercel.app/api/webhooks/resend
 2. Signature valide → réponse **200** dans tous les cas ; une erreur de traitement est journalisée (`[WEBHOOK] Erreur de traitement`) mais ne provoque pas de rejeu par Resend.
 3. Dédoublonnage par `svix-id` (`webhook_event:*`).
 4. Mise à jour atomique de `email_track:{id}` **et** des compteurs du jour d'envoi par un script Lua (`EVENT_SCRIPT`, voir Statuts). Le `message_id` fourni par Resend est enregistré (fil de discussion des relances). Un `email_id` absent du KV (ex. copie commerciale) est ignoré.
-5. Une seule Note HubSpot par type (« Email ouvert » à la première ouverture, « Lien cliqué » au premier clic humain, confirmé 3 secondes après), jamais pour un clic automatique ni pour reçu / adresse invalide / signalé comme indésirable (`hubspot_note:*`). Si HubSpot échoue, le verrou est relâché : l'événement suivant du même type recréera la Note.
+5. Une seule Note HubSpot par type (« Email ouvert » à la première ouverture, « Email cliqué » au premier clic humain, confirmé 3 secondes après), jamais pour un clic automatique ni pour reçu / adresse invalide / indésirable (`hubspot_note:*`). Si HubSpot échoue, le verrou est relâché : l'événement suivant du même type recréera la Note.
 
 ---
 
@@ -456,7 +480,7 @@ Sujet : {sujet}
 {corps du mail}
 ```
 
-La note est associée au contact via `associationTypeId: 202`. Les ouvertures et clics ajoutent une Note « 👁️ Email ouvert le… » / « 🖱️ Lien cliqué le… » (une seule de chaque par email ; ancien libellé : « Email cliqué »).
+La note est associée au contact via `associationTypeId: 202`. Les ouvertures et clics ajoutent une Note « 👁️ Email ouvert le… » / « 🖱️ Email cliqué le… » (une seule de chaque par email).
 
 ### Scopes requis sur la Private App HubSpot
 - `crm.objects.contacts.read` — recherche contacts

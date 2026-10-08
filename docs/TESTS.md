@@ -144,7 +144,7 @@ Compteurs : `HGETALL stats:day:<jour d'envoi>` ; entrée : `GET email_track:<id>
 | H2 | `delivered --message-id=<x>` sur H1 | statut `délivré`, `delivered_at`, `message_id` ; `delivered` +1 |
 | H3 | `delivered` puis `opened --created-at=<livraison + 1 s>` | ouverture **humaine** : statut `ouvert`, `opened` +1, 1 Note « Email ouvert » |
 | H4 | 2 × `opened` de plus | `first_opened_at` figé, `last_opened_at` mis à jour, `open_count: 3` ; `opened` +1 une seule fois ; 1 seule Note |
-| H5 | Un `clicked` isolé | humain : statut `cliqué`, `clicked` +1 ; Note « 🖱️ Lien cliqué le… » créée ~3 s après |
+| H5 | Un `clicked` isolé | humain : statut `cliqué`, `clicked` +1 ; Note « 🖱️ Email cliqué le… » créée ~3 s après |
 | H5b | Rafale (`seed --clicks`) : 3 `clicked` **en parallèle** sur 3 liens différents, `--click-at` à 0 / 0,4 / 0,8 s | les 3 clics `AUTO(rafale)` dans `email_clicks`, `click_count: 0`, `auto_click_count: 3`, statut `délivré`, `clicked` et `opened` inchangés, log « Premier clic reclassé automatique, Note non créée » |
 | H5c | Même rafale, ordre d'arrivée inversé | même résultat |
 | H5d | Même lien cliqué 2 fois en 0,5 s | 2 clics humains, `click_count: 2`, 1 Note |
@@ -177,6 +177,18 @@ Toujours avec `--contact=<contact de test> --subject-prefix="[TEST-DEDUP]"`.
 | I2 | `--host` faux | refus, exit 1 |
 | I3 | `--apply` | 4 Notes archivées (404 en lecture), toutes les autres présentes ; mails du KV intacts |
 | I4 | 2e passage | « 0 doublon(s) », B toujours ambigu |
+
+### J. Envois de test (`scripts/purge-test-sends.ts`) — base KV de test uniquement
+
+Données : `seed --relance --names --purge` (envois au PS de test au nom de « Commercial de test », Kaoufer, Loane et Zacharie, dont un repéré par l'adresse seule ; 2 envois à un PS fictif `99999999999` / `ps.fictif@example.invalid` par Zacharie et Sarah ; anciennes relances des deux PS).
+> Ne pas envoyer de webhook sur les envois du PS fictif : le webhook tenterait une Note HubSpot sur un contact inexistant (HubSpot la refuse, l'erreur est journalisée).
+
+| # | Étapes | Attendu |
+|---|---|---|
+| J1 | Rapport (avant migration) | 6 envois du PS de test listés par commercial, 3 anciennes relances ; 2 envois et 1 relance du PS fictif conservés ; aucune modification |
+| J2 | `--apply` avec `--backup-dir` vide | refus, exit 1 |
+| J3 | `--export` puis `--apply` | restent : les 2 envois du PS fictif, `emails_index` à 2 membres, `relance:test-autre-ps` ; migration puis `--verify` à 0 écart |
+| J4 | Après migration : ouvertures / clics sur des envois du PS de test, `--verify` (0), purge `--apply`, `--verify` | contributions décomptées, 0 écart ; compteurs du PS fictif inchangés (y compris par commercial) ; `idx:contact:18421683158` supprimé, `idx:contact:99999999999` intact |
 
 ### G. Non-régression complète
 

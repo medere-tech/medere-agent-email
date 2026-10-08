@@ -2,7 +2,7 @@
  * Données de test pour l'Agent Mail DPC — base KV de TEST uniquement.
  *
  * Usage (Node ≥ 22.18, exécute le TypeScript sans dépendance) :
- *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks]
+ *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks] [--purge]
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts webhook <type> <email_id> [--created-at=<iso>] [--message-id=<id>] [--svix-id=<suffixe>]
  *       type : delivered | bounced | complained | opened | clicked
  *       --created-at : date de l'événement (défaut : maintenant)
@@ -27,6 +27,9 @@
  *   email_track:test-legacy-kaoufer  (--names) commercial « Kaoufer Guercif » → rattaché à kaoufer@medere.fr
  *   email_track:test-legacy-loane    (--names) commercial « Loane Deluge » → nom:loane-deluge (fiche justine.m@)
  *   email_track:test-click-a|b|c     (--clicks) envois neufs pour les rafales de clics
+ *   email_track:test-purge-*         (--purge) envois au PS de test au nom de Zacharie / Kaoufer (adresse seule)
+ *   email_track:test-autre-ps-*      (--purge) envois à un PS fictif (99999999999) qui doivent rester intacts
+ *   relance:test-purge-zacharie / relance:test-autre-ps   (--purge) anciennes relances (PS de test / autre PS)
  *   emails_index                     + les ids ci-dessus
  *   relance:test-seed-today          (--relance) relance du jour, rattachable à test-seed-envoye
  *   relance:test-seed-orphan         (--relance) relance sans envoi correspondant (reprise en legacy)
@@ -40,9 +43,12 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const CLICK_IDS = ['test-click-a', 'test-click-b', 'test-click-c']
-const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS]
-const RELANCE_KEYS = ['relance:test-seed-today', 'relance:test-seed-orphan']
-const SEED_COMMERCIAL_KEYS = ['nom:commercial-de-test', 'kaoufer@medere.fr', 'nom:loane-deluge']
+// --purge : envois au PS de test au nom de vrais commerciaux (à purger) et envois à un PS fictif (à garder)
+const PURGE_IDS = ['test-purge-zacharie', 'test-purge-kaoufer-email', 'test-autre-ps-zacharie', 'test-autre-ps-sarah']
+const OTHER_PS = { contact_id: '99999999999', ps_email: 'ps.fictif@example.invalid', ps_nom: 'Docteur PS Fictif' }
+const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS]
+const RELANCE_KEYS = ['relance:test-seed-today', 'relance:test-seed-orphan', 'relance:test-purge-zacharie', 'relance:test-autre-ps']
+const SEED_COMMERCIAL_KEYS = ['nom:commercial-de-test', 'kaoufer@medere.fr', 'nom:loane-deluge', 'zacharie@medere.fr', 'sarah.s@medere.fr']
 const WEBHOOK_PREFIX = 'msg_seedtest_'
 const WEBHOOK_TYPES = ['delivered', 'bounced', 'complained', 'opened', 'clicked']
 
@@ -107,7 +113,7 @@ async function scan(pattern: string): Promise<string[]> {
   return keys
 }
 
-async function seed(withRelance: boolean, withNames: boolean, withClicks: boolean): Promise<void> {
+async function seed(withRelance: boolean, withNames: boolean, withClicks: boolean, withPurge: boolean): Promise<void> {
   const contactId = required('TEST_HUBSPOT_CONTACT_ID')
   const psEmail = required('TEST_PS_EMAIL')
   const now = new Date()
@@ -160,6 +166,27 @@ async function seed(withRelance: boolean, withNames: boolean, withClicks: boolea
       await kv('ZADD', 'emails_index', Date.parse(sentAt), id)
       ids.push(id)
     }
+  }
+
+  if (withPurge) {
+    const slackId = required('TEST_SLACK_USER_ID')
+    const cases: [string, Record<string, string>, string][] = [
+      ['test-purge-zacharie', { commercial_name: 'Zacharie Groch' }, 'au PS de test (contact)'],
+      ['test-purge-kaoufer-email', { commercial_name: 'Kaoufer Guercif', contact_id: '0' }, 'au PS de test (adresse seule)'],
+      ['test-autre-ps-zacharie', { commercial_name: 'Zacharie Groch', ...OTHER_PS }, 'à un autre PS'],
+      ['test-autre-ps-sarah', { commercial_name: 'Sarah Smadja', ...OTHER_PS }, 'à un autre PS'],
+    ]
+    for (const [id, over, label] of cases) {
+      await kv('SET', `email_track:${id}`, JSON.stringify({
+        ...base, ...over, sujet: `[TEST-SEED] envoi ${label} par ${over.commercial_name}`, statut: 'envoyé',
+        sent_at: sentAt, opened_at: null, clicked_at: null,
+      }))
+      await kv('ZADD', 'emails_index', Date.parse(sentAt), id)
+      ids.push(id)
+    }
+    const relance = { commercial_slack_id: slackId, commercial_name: 'Zacharie Groch', formation_nom: 'Formation de test', formation_numero: '00000000000', corps: 'x', relance_at: iso.split('T')[0], sent_at: sentAt }
+    await kv('SET', 'relance:test-purge-zacharie', JSON.stringify({ ...relance, ps_nom: 'Test', ps_email: psEmail, ps_hubspot_id: contactId, ps_rpps: '', sujet: '[TEST-SEED] relance PS de test' }), 'EX', 2 * 86400)
+    await kv('SET', 'relance:test-autre-ps', JSON.stringify({ ...relance, ps_nom: OTHER_PS.ps_nom, ps_email: OTHER_PS.ps_email, ps_hubspot_id: OTHER_PS.contact_id, ps_rpps: '', sujet: '[TEST-SEED] relance autre PS' }), 'EX', 2 * 86400)
   }
 
   const created = [...ids.map((id) => `email_track:${id}`), `emails_index (+${ids.length} membres)`]
@@ -249,6 +276,8 @@ async function clean(): Promise<void> {
     'emails_index',
     'relances_due',
     `idx:contact:${required('TEST_HUBSPOT_CONTACT_ID')}`,
+    `idx:contact:${OTHER_PS.contact_id}`,
+    'idx:contact:0',
     ...SEED_COMMERCIAL_KEYS.map((k) => `idx:commercial:${k}`),
   ]
   let removed = 0
@@ -289,7 +318,7 @@ async function checkSlack(): Promise<void> {
 async function main(): Promise<void> {
   assertTestKv()
   const [cmd = 'seed', ...args] = process.argv.slice(2)
-  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'), args.includes('--clicks'))
+  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'), args.includes('--clicks'), args.includes('--purge'))
   if (cmd === 'webhook') return webhook(args[0], args[1], args.slice(2))
   if (cmd === 'clean') return clean()
   if (cmd === 'check-slack') return checkSlack()

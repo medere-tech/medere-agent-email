@@ -119,9 +119,9 @@ function StatutBadge({ statut }: { statut: EmailEntry['statut'] }) {
     envoyé:  { icon: <Icons.Send />,  label: 'Envoyé',  cls: 'bg-zinc-100 text-zinc-500' },
     délivré: { icon: <Icons.Delivered />, label: 'Reçu', cls: 'bg-zinc-100 text-zinc-700' },
     ouvert:  { icon: <Icons.Eye />,   label: 'Ouvert',  cls: 'bg-zinc-900 text-white' },
-    cliqué:  { icon: <Icons.Click />, label: 'Lien cliqué', cls: 'bg-zinc-900 text-white' },
+    cliqué:  { icon: <Icons.Click />, label: 'Cliqué', cls: 'bg-zinc-900 text-white' },
     bounce:  { icon: <Icons.Alert />, label: 'Adresse invalide', cls: 'border border-zinc-400 text-zinc-700' },
-    plainte: { icon: <Icons.Alert />, label: 'Signalé comme indésirable', cls: 'border border-zinc-400 text-zinc-700' },
+    plainte: { icon: <Icons.Alert />, label: 'Indésirable', cls: 'border border-zinc-400 text-zinc-700' },
   }
   const c = config[statut] ?? config['envoyé']
   return (
@@ -285,7 +285,7 @@ export default function SuiviPage() {
             <StatCard
               label="Taux de clic"
               value={pct(data.stats.cliques, data.stats.total)}
-              sub={`${data.stats.cliques.toLocaleString('fr-FR')} avec lien cliqué`}
+              sub={`${data.stats.cliques.toLocaleString('fr-FR')} cliqué${data.stats.cliques > 1 ? 's' : ''}`}
             />
           </div>
         )}
@@ -422,12 +422,12 @@ export default function SuiviPage() {
                                       {email.clicked_at ? (
                                         <div className="flex items-center gap-2 text-zinc-800">
                                           <Icons.Click />
-                                          <span>Lien cliqué le {formatFull(email.clicked_at)}</span>
+                                          <span>Cliqué le {formatFull(email.clicked_at)}</span>
                                         </div>
                                       ) : (
                                         <div className="flex items-center gap-2 text-zinc-300">
                                           <Icons.Click />
-                                          <span>Aucun lien cliqué</span>
+                                          <span>Pas encore cliqué</span>
                                         </div>
                                       )}
                                     </div>

@@ -1,5 +1,5 @@
 /**
- * Supprime les Notes HubSpot « Email ouvert » / « Lien cliqué » créées en double par l'agent
+ * Supprime les Notes HubSpot « Email ouvert » / « Email cliqué » créées en double par l'agent
  * pour un même mail (avant la phase 1, le webhook créait une Note par événement).
  *
  * Usage (Node ≥ 22.18, exécute le TypeScript sans dépendance) :
@@ -15,7 +15,7 @@
  *   - Rapport seul par défaut : rien n'est modifié sans --apply. --host doit correspondre au KV.
  *   - Seules les Notes au format exact de l'agent sont prises en compte :
  *       « 👁️ <b>Email ouvert le …</b><br><br><b>Sujet :</b> …<br><b>Commercial :</b> … »
- *       « 🖱️ <b>Email cliqué le …</b>… » (ancien libellé) ou « 🖱️ <b>Lien cliqué le …</b>… »
+ *       « 🖱️ <b>Email cliqué le …</b>… » ou « 🖱️ <b>Lien cliqué le …</b>… » (libellé créé pendant les tests)
  *     Toute autre Note (saisie à la main, « Email envoyé », etc.) est ignorée.
  *   - Les Notes sont regroupées par contact, type (ouverture / clic), sujet et commercial. Le KV
  *     doit contenir EXACTEMENT un mail à ce contact avec ce sujet et ce commercial : la Note la

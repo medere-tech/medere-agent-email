@@ -367,3 +367,32 @@ if ARGV[4] ~= '' then redis.call('SET', KEYS[4], ARGV[4], 'NX', 'EX', tonumber(A
 redis.call('DEL', KEYS[3])
 return 1
 `
+
+// Suppression complète d'un envoi (scripts/purge-test-sends.ts) : ses contributions aux compteurs
+// (marqueurs counted_*) sont retirées du hash du jour d'envoi, puis toutes ses clés et entrées d'index.
+// KEYS : 1 track, 2 stats:day, 3 emails_index, 4 idx:commercial, 5 idx:contact, 6 relances_due,
+//        7 email_body, 8 email_clicks, 9 send_result, 10 hubspot_note opened, 11 hubspot_note clicked
+// ARGV : 1 id
+// Retour : nombre de compteurs décomptés (-1 si l'envoi n'existe plus)
+export const PURGE_SEND_SCRIPT = LUA_COMMON + `
+local raw = redis.call('GET', KEYS[1])
+local decremented = -1
+if raw then
+  decremented = 0
+  local d = cjson.decode(raw)
+  if d.v == 2 then
+    for _, field in ipairs({ 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained' }) do
+      if d['counted_' .. field] then
+        uncount(d, KEYS[2], field)
+        decremented = decremented + 1
+      end
+    end
+  end
+end
+redis.call('ZREM', KEYS[3], ARGV[1])
+redis.call('ZREM', KEYS[4], ARGV[1])
+redis.call('ZREM', KEYS[5], ARGV[1])
+redis.call('ZREM', KEYS[6], ARGV[1])
+redis.call('DEL', KEYS[1], KEYS[7], KEYS[8], KEYS[9], KEYS[10], KEYS[11])
+return decremented
+`

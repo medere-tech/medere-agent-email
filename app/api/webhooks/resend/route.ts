@@ -112,7 +112,7 @@ async function handleEvent(event: ReturnType<typeof resend.webhooks.verify>, svi
   if (!noteKind) return
 
   const emoji = noteKind === 'opened' ? '👁️' : '🖱️'
-  const action = noteKind === 'opened' ? 'Email ouvert' : 'Lien cliqué'
+  const action = noteKind === 'opened' ? 'Email ouvert' : 'Email cliqué'
   const date = new Intl.DateTimeFormat('fr-FR', {
     day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris',
   }).format(noteDate)
