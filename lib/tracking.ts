@@ -291,7 +291,7 @@ export async function purgeExpired(maxBatches = 20, batchSize = 200): Promise<nu
 
     const pipe = kv.pipeline()
     for (const { id, entry } of all) {
-      pipe.del(KEYS.track(id), KEYS.body(id), KEYS.clicks(id), KEYS.sendResult(id), KEYS.noteLock(id, 'opened'), KEYS.noteLock(id, 'clicked'))
+      pipe.del(KEYS.track(id), KEYS.body(id), KEYS.clicks(id), KEYS.sendResult(id), KEYS.noteLock(id, 'opened'), KEYS.noteLock(id, 'clicked'), KEYS.relanceDraft(id), KEYS.relanceGenLock(id))
       pipe.zrem(KEYS.relancesDue, id)
       if (entry?.commercial_key) pipe.zrem(KEYS.byCommercial(entry.commercial_key), id)
       if (entry?.contact_id) pipe.zrem(KEYS.byContact(entry.contact_id), id)

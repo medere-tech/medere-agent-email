@@ -1,9 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { generateMail } from '@/lib/claude'
+import { streamMail } from '@/lib/claude'
+import { parseGeneratedMail } from '@/lib/generated-mail'
 import { getFormationsUpsell, getFormationsDejaFaites } from '@/lib/airtable'
 import { requireActor, senderFor } from '@/lib/identity'
 import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
 
+export const dynamic = 'force-dynamic'
+
+const FAILED = 'La rédaction du mail a échoué. Réessaie.'
+
+// Rédaction du mail, transmise au fil de l'eau pour l'affichage progressif.
+// Contrôles (identité, débit, données) d'abord, en JSON avec le code d'erreur habituel ; ensuite
+// réponse en NDJSON, une ligne par événement :
+//   {"t":"start"}  envoyé tout de suite (ouverture de l'étape 5)
+//   {"t":"delta","d":"<texte>"}  morceau de texte (« Objet : … », ligne vide, puis le mail)
+//   {"t":"done","sujet":"…","corps":"…"}  fin, objet et texte définitifs
+//   {"t":"error","error":"…"}  échec en cours de rédaction
 export async function POST(req: NextRequest) {
   try {
     // Identité relue côté serveur : aucun commercial venant du navigateur n'est cru
@@ -54,17 +66,56 @@ export async function POST(req: NextRequest) {
     }
 
     if (resolved.onBehalf) console.log('[GENERATE] Génération par', actor.email, 'au nom de', sender.email)
-    const result = await generateMail({
+    const params = {
       commercial: { name: sender.name, email: sender.email, phone: sender.phone },
       formation,
       sessions,
       ps,
       formationsLiees,
-    })
+    }
 
-    return NextResponse.json({ sujet: result.sujet, corps: result.corps })
+    const encoder = new TextEncoder()
+    // Navigateur parti (retour à l'étape 4, onglet fermé) : la rédaction chez Claude est arrêtée
+    let cancelled = false
+    const stream = new ReadableStream({
+      async start(controller) {
+        const emit = (event: Record<string, unknown>) => {
+          if (cancelled) return
+          try { controller.enqueue(encoder.encode(JSON.stringify(event) + '\n')) } catch { cancelled = true }
+        }
+        // Premier événement immédiat : la réponse part tout de suite, l'étape 5 s'ouvre sans attendre Claude
+        emit({ t: 'start' })
+        let full = ''
+        try {
+          for await (const delta of streamMail(params)) {
+            if (cancelled) break
+            full += delta
+            emit({ t: 'delta', d: delta })
+          }
+          if (cancelled) return
+          const { sujet, corps } = parseGeneratedMail(full)
+          if (!sujet || !corps) throw new Error('Réponse de Claude incomplète (objet ou texte manquant)')
+          emit({ t: 'done', sujet, corps })
+        } catch (e: any) {
+          console.error('[GENERATE] Rédaction en échec :', e.message)
+          emit({ t: 'error', error: FAILED })
+        } finally {
+          try { controller.close() } catch { /* déjà fermé */ }
+        }
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'application/x-ndjson; charset=utf-8',
+        'Cache-Control': 'no-store, no-transform',
+        'X-Accel-Buffering': 'no',
+      },
+    })
   } catch (e: any) {
     console.error('Generate error:', e)
-    return NextResponse.json({ error: 'La rédaction du mail a échoué. Réessaie.' }, { status: 500 })
+    return NextResponse.json({ error: FAILED }, { status: 500 })
   }
 }

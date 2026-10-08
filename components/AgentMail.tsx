@@ -1,6 +1,8 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { linkWarnings, renderMail } from '@/lib/render-mail'
+import { parseGeneratedMail } from '@/lib/generated-mail'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 // Fiche commercial (id Airtable) : le serveur relit nom, email, HubSpot et Slack à partir de l'id
@@ -10,6 +12,9 @@ interface Me { email: string; name: string; role: 'admin' | 'commercial' | 'lect
 interface Formation { id: string; nom: string; numero: string; format: string; public: string[] }
 interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string }
 interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
+
+// Envoi récent au même contact (alerte « déjà contacté » de l'étape 4)
+interface HistoryItem { relance: boolean; commercial: string; envoyeLe: string; formation: string; statut: string }
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6
 
@@ -257,6 +262,13 @@ export default function AgentMail() {
   // tout renvoi de ce mail (double clic, timeout) → Resend ne l'envoie qu'une fois.
   const [idempotencyKey, setIdempotencyKey] = useState('')
   const sendingRef = useRef(false)
+  // Rédaction en cours (texte affiché au fil de l'eau) ; annulable par « Retour »
+  const [generating, setGenerating] = useState(false)
+  const genAbortRef = useRef<AbortController | null>(null)
+  // Étape 5 : texte modifiable ou aperçu du mail tel que reçu
+  const [view, setView] = useState<'texte' | 'apercu'>('texte')
+  // Envois récents au contact choisi (null = pas encore vérifié)
+  const [history, setHistory] = useState<{ contactId: string; jours: number; envois: HistoryItem[]; failed: boolean } | null>(null)
 
   // UI states
   const [loading, setLoading] = useState(false)
@@ -359,20 +371,48 @@ export default function AgentMail() {
     return () => clearTimeout(t)
   }, [contactSearch])
 
+  // « Déjà contacté » : envois au même contact sur les 14 derniers jours, dès qu'il est choisi
+  useEffect(() => {
+    if (!psContact) { setHistory(null); return }
+    let alive = true
+    const contactId = psContact.id
+    fetchJson(`/api/contact-history?contactId=${encodeURIComponent(contactId)}`)
+      .then((d) => { if (alive) setHistory({ contactId, jours: d.jours || 14, envois: d.envois || [], failed: false }) })
+      .catch(() => { if (alive) setHistory({ contactId, jours: 14, envois: [], failed: true }) })
+    return () => { alive = false }
+  }, [psContact])
+
+  // Aperçu fidèle : même fonction de rendu que l'envoi ; avertissements une fois la rédaction finie
+  const previewHtml = useMemo(() => renderMail(mailCorps).html, [mailCorps])
+  const warnings = useMemo(() => (generating ? [] : linkWarnings(mailCorps)), [mailCorps, generating])
+
   const toggleSession = (s: Session) => {
     setSelectedSessions((prev) =>
       prev.find((p) => p.id === s.id) ? prev.filter((p) => p.id !== s.id) : [...prev, s]
     )
   }
 
+  // Rédaction affichée au fil de l'eau : l'étape 5 s'ouvre dès que le serveur commence à répondre,
+  // l'objet puis le texte s'y écrivent progressivement (réponse NDJSON de /api/generate).
   const handleGenerate = async () => {
     if (!commercial || !formation || !selectedSessions.length || !psContact) return
+    genAbortRef.current?.abort()
+    const ctrl = new AbortController()
+    genAbortRef.current = ctrl
     setLoading(true)
+    setGenerating(true)
     setError('')
+    setMailSujet('')
+    setMailCorps('')
+    setView('texte')
+    let onStep5 = false
     try {
-      const data = await fetchJson('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      let res: Response
+      try {
+        res = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctrl.signal,
         body: JSON.stringify({
           commercial_id: commercial.id,
           formation: { id: formation.id, nom: formation.nom, numero: formation.numero, format: formation.format, public: formation.public },
@@ -392,16 +432,73 @@ export default function AgentMail() {
             rpps: psContact.rpps || '',
           },
         }),
-      })
-      setMailSujet(data.sujet)
-      setMailCorps(data.corps)
-      setIdempotencyKey(crypto.randomUUID())
+        })
+      } catch {
+        if (ctrl.signal.aborted) return
+        throw new Error('Connexion impossible. Vérifie ta connexion internet puis réessaie.')
+      }
+      if (res.redirected && new URL(res.url).pathname === '/login') throw new Error(SESSION_EXPIRED)
+      if (!res.ok || !res.body || !(res.headers.get('content-type') || '').includes('ndjson')) {
+        const data = await res.json().catch(() => null)
+        throw new Error(data?.error || 'Une erreur est survenue. Réessaie dans quelques instants.')
+      }
       setStep(5)
+      onStep5 = true
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let raw = ''
+      let finished = false
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let nl: number
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl).trim()
+          buffer = buffer.slice(nl + 1)
+          if (!line) continue
+          const event = JSON.parse(line)
+          if (event.t === 'delta') {
+            raw += event.d
+            const parsed = parseGeneratedMail(raw)
+            setMailSujet(parsed.sujet)
+            setMailCorps(parsed.corps)
+          } else if (event.t === 'done') {
+            setMailSujet(event.sujet)
+            setMailCorps(event.corps)
+            finished = true
+          } else if (event.t === 'error') {
+            throw new Error(event.error)
+          }
+        }
+      }
+      if (!finished) throw new Error('La rédaction du mail a été interrompue. Réessaie.')
+      setIdempotencyKey(crypto.randomUUID())
     } catch (e: any) {
+      if (ctrl.signal.aborted) return
       setError(e.message)
+      setMailSujet('')
+      setMailCorps('')
+      if (onStep5) setStep(4)
     } finally {
-      setLoading(false)
+      if (genAbortRef.current === ctrl) {
+        genAbortRef.current = null
+        setLoading(false)
+        setGenerating(false)
+      }
     }
+  }
+
+  // « Retour » pendant la rédaction : la requête est annulée (le serveur arrête Claude)
+  const cancelGenerate = () => {
+    genAbortRef.current?.abort()
+    genAbortRef.current = null
+    setLoading(false)
+    setGenerating(false)
+    setMailSujet('')
+    setMailCorps('')
+    setStep(4)
   }
 
   const handleSend = async () => {
@@ -442,6 +539,7 @@ export default function AgentMail() {
   }
 
   const reset = () => {
+    genAbortRef.current?.abort()
     setStep(1)
     setCommercial(me?.commercial ?? null)
     setFormation(null)
@@ -468,7 +566,7 @@ export default function AgentMail() {
     2: !!formation,
     3: selectedSessions.length > 0,
     4: !!psContact,
-    5: !!mailSujet && !!mailCorps,
+    5: !!mailSujet && !!mailCorps && !generating,
   }
 
   return (
@@ -775,6 +873,27 @@ export default function AgentMail() {
                 </div>
               )}
 
+              {psContact && history?.contactId === psContact.id && history.envois.length > 0 && (
+                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-sm text-amber-800" data-alerte="deja-contacte">
+                  <div className="flex items-start gap-2 font-medium">
+                    <Icons.Warning />
+                    <span>Déjà contacté ces {history.jours} derniers jours</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 space-y-1 text-xs">
+                    {history.envois.map((h, i) => (
+                      <li key={i}>
+                        {h.relance ? 'Relance' : 'Mail'} de <strong>{h.commercial}</strong> le {formatDateTime(h.envoyeLe)}
+                        {h.formation ? <> · formation « {h.formation} »</> : null} · <strong>{h.statut}</strong>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {psContact && history?.contactId === psContact.id && history.failed && (
+                <p className="text-xs text-zinc-500">Impossible de vérifier les envois récents à ce contact. Consulte le suivi avant d'envoyer.</p>
+              )}
+
               <div className="flex gap-2">
                 <button onClick={() => setStep(3)} className="px-4 py-2.5 border border-zinc-200 text-sm font-medium rounded-lg hover:bg-zinc-50 transition-colors">
                   Retour
@@ -795,7 +914,9 @@ export default function AgentMail() {
             <div className="space-y-4">
               <div>
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Aperçu du mail</h2>
-                <p className="text-sm text-zinc-500">Vérifie et modifie si nécessaire avant d'envoyer.</p>
+                <p className="text-sm text-zinc-500">
+                  {generating ? 'Claude rédige le mail…' : 'Vérifie et modifie si nécessaire avant d\'envoyer.'}
+                </p>
               </div>
 
               <div className="space-y-2.5">
@@ -805,27 +926,80 @@ export default function AgentMail() {
                     type="text"
                     value={mailSujet}
                     onChange={(e) => setMailSujet(e.target.value)}
-                    className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-900/10"
+                    readOnly={generating}
+                    placeholder={generating ? 'Rédaction en cours…' : ''}
+                    className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-900/10 read-only:bg-zinc-50"
                   />
                 </div>
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-medium text-zinc-500">Corps du mail</label>
-                    <span className="text-[10px] text-zinc-400">{mailCorps.length} caractères</span>
+                    <div className="flex gap-1" role="tablist">
+                      {([['texte', 'Texte'], ['apercu', 'Aperçu']] as const).map(([v, label]) => (
+                        <button
+                          key={v}
+                          type="button"
+                          role="tab"
+                          aria-selected={view === v}
+                          onClick={() => setView(v)}
+                          className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                            view === v ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-200 text-zinc-600 hover:border-zinc-300'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+                      {generating && <Icons.Loader />}
+                      {generating ? 'Rédaction en cours' : `${mailCorps.length} caractères`}
+                    </span>
                   </div>
-                  <textarea
+
+                  {view === 'texte' ? (
+                    <textarea
                       value={mailCorps}
                       onChange={(e) => setMailCorps(e.target.value)}
+                      readOnly={generating}
                       rows={14}
-                      className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y"
+                      data-zone="texte"
+                      className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y read-only:bg-zinc-50"
                     />
-
-                    {/* Affichage du corps du mail avec rendu HTML (à décommenter en fonction des retours des commerciaux) */}
-                    {/* <div className="mt-2 p-3.5 border border-zinc-100 rounded-lg bg-zinc-50 text-sm text-zinc-700 leading-relaxed"
-                      dangerouslySetInnerHTML={{ __html: mailCorps.replace(/\n/g, '<br>') }}
-                    /> */}
+                  ) : (
+                    <div className="border border-zinc-200 rounded-lg overflow-hidden bg-white" data-zone="apercu">
+                      <div className="px-3.5 py-2.5 bg-zinc-50 border-b border-zinc-200 text-xs text-zinc-600 space-y-0.5">
+                        <div><span className="text-zinc-400">De :</span> {commercial?.name} – Médéré</div>
+                        <div><span className="text-zinc-400">À :</span> {psContact?.email}</div>
+                        <div><span className="text-zinc-400">Objet :</span> <span className="font-medium text-zinc-900">{mailSujet}</span></div>
+                      </div>
+                      {/* Même HTML que le mail envoyé (renderMail), avec l'apparence par défaut d'une messagerie.
+                          Un clic sur un lien l'ouvre dans un nouvel onglet, sans quitter l'agent. */}
+                      <div
+                        className="px-4 py-3.5 max-h-[28rem] overflow-y-auto break-words [&_a]:text-[#1155cc] [&_a]:underline"
+                        style={{ fontFamily: 'Arial, Helvetica, sans-serif', fontSize: '14px', lineHeight: 1.5, color: '#222' }}
+                        onClick={(e) => {
+                          const a = (e.target as HTMLElement).closest('a')
+                          if (a) { e.preventDefault(); window.open(a.href, '_blank', 'noopener,noreferrer') }
+                        }}
+                        dangerouslySetInnerHTML={{ __html: previewHtml }}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {warnings.length > 0 && (
+                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-sm text-amber-800" data-alerte="liens">
+                  <div className="flex items-start gap-2 font-medium">
+                    <Icons.Warning />
+                    <span>{warnings.length === 1 ? 'Un lien à vérifier' : `${warnings.length} liens à vérifier`} avant l'envoi</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 space-y-1 text-xs">
+                    {warnings.map((w, i) => (
+                      <li key={i}><span className="font-mono bg-white/60 px-1 rounded">{w.extrait}</span> : {w.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               <div className="p-3 bg-zinc-50 border border-zinc-200 rounded-lg flex items-center gap-2.5 text-xs text-zinc-600">
                 <Icons.Mail />
@@ -833,7 +1007,7 @@ export default function AgentMail() {
               </div>
 
               <div className="flex gap-2">
-                <button onClick={() => setStep(4)} className="px-4 py-2.5 border border-zinc-200 text-sm font-medium rounded-lg hover:bg-zinc-50 transition-colors">
+                <button onClick={generating ? cancelGenerate : () => setStep(4)} className="px-4 py-2.5 border border-zinc-200 text-sm font-medium rounded-lg hover:bg-zinc-50 transition-colors">
                   Retour
                 </button>
                 <button
@@ -841,7 +1015,7 @@ export default function AgentMail() {
                   disabled={!canProceed[5] || loading}
                   className="flex-1 py-2.5 bg-zinc-900 text-white text-sm font-medium rounded-lg hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
                 >
-                  {loading ? <><Icons.Loader /> Envoi en cours...</> : <><Icons.Send /> Envoyer le mail</>}
+                  {generating ? <><Icons.Loader /> Rédaction en cours...</> : loading ? <><Icons.Loader /> Envoi en cours...</> : <><Icons.Send /> Envoyer le mail</>}
                 </button>
               </div>
             </div>
@@ -926,6 +1100,14 @@ function StatusRow({ icon, label, ok, detail }: {
       </div>
     </div>
   )
+}
+
+function formatDateTime(iso: string) {
+  try {
+    return new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' }).format(new Date(iso))
+  } catch {
+    return ''
+  }
 }
 
 function formatDateShort(d: string) {

@@ -2,7 +2,7 @@
  * Données de test pour l'Agent Mail DPC — base KV de TEST uniquement.
  *
  * Usage (Node ≥ 22.18, exécute le TypeScript sans dépendance) :
- *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks] [--purge] [--relances]
+ *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks] [--purge] [--relances] [--historique]
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts webhook <type> <email_id> [--created-at=<iso>] [--message-id=<id>] [--svix-id=<suffixe>]
  *       type : delivered | bounced | complained | opened | clicked
  *       --created-at : date de l'événement (défaut : maintenant)
@@ -51,7 +51,9 @@ const PURGE_IDS = ['test-purge-zacharie', 'test-purge-kaoufer-email', 'test-autr
 const OTHER_PS = { contact_id: '99999999999', ps_email: 'ps.fictif@example.invalid', ps_nom: 'Docteur PS Fictif' }
 // --relances : envois de la fiche de test (Dethie Faye) avec relance J+3 due, statuts variés
 const RELANCE_IDS = ['test-rel-non-ouvert', 'test-rel-ouvert', 'test-rel-clique', 'test-rel-bounce', 'test-rel-plainte', 'test-rel-deja', 'test-rel-sans-slack', 'test-rel-zacharie']
-const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS, ...RELANCE_IDS]
+// --historique : envois récents au contact de test (alerte « déjà contacté » de l'étape 4)
+const HISTORY_IDS = ['test-hist-2j', 'test-hist-6j', 'test-hist-6j-relance', 'test-hist-20j', 'test-hist-autre']
+const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS, ...RELANCE_IDS, ...HISTORY_IDS]
 const RELANCE_KEYS = ['relance:test-seed-today', 'relance:test-seed-orphan', 'relance:test-purge-zacharie', 'relance:test-autre-ps', 'relance:test-rel-legacy']
 const SEED_COMMERCIAL_KEYS = ['nom:commercial-de-test', 'kaoufer@medere.fr', 'nom:loane-deluge', 'zacharie@medere.fr', 'sarah.s@medere.fr']
 const WEBHOOK_PREFIX = 'msg_seedtest_'
@@ -118,7 +120,7 @@ async function scan(pattern: string): Promise<string[]> {
   return keys
 }
 
-async function seed(withRelance: boolean, withNames: boolean, withClicks: boolean, withPurge: boolean, withRelances: boolean): Promise<void> {
+async function seed(withRelance: boolean, withNames: boolean, withClicks: boolean, withPurge: boolean, withRelances: boolean, withHistory: boolean): Promise<void> {
   const contactId = required('TEST_HUBSPOT_CONTACT_ID')
   const psEmail = required('TEST_PS_EMAIL')
   const now = new Date()
@@ -169,6 +171,24 @@ async function seed(withRelance: boolean, withNames: boolean, withClicks: boolea
         sent_at: sentAt, opened_at: null, clicked_at: null,
       }))
       await kv('ZADD', 'emails_index', Date.parse(sentAt), id)
+      ids.push(id)
+    }
+  }
+
+  if (withHistory) {
+    // idx:contact du contact de test : 2 jours (Dethie, Ouvert), 6 jours (Zacharie, Cliqué) + sa relance
+    // 4 jours, 20 jours (hors fenêtre de 14 jours) ; un envoi d'il y a 1 jour à un autre contact (0)
+    const ago = (d: number) => now.getTime() - d * 86400000
+    const hist: [string, number, string, Record<string, unknown>][] = [
+      ['test-hist-2j', ago(2), contactId, { statut: 'ouvert', commercial_name: 'Dethie Faye', formation_nom: 'Repérer et prendre en charge les symptômes associés au COVID long' }],
+      ['test-hist-6j', ago(6), contactId, { statut: 'cliqué', commercial_name: 'Zacharie Groch', formation_nom: 'Formation de test (historique)', relance_id: 'test-hist-6j-relance' }],
+      ['test-hist-6j-relance', ago(4), contactId, { statut: 'délivré', kind: 'relance', parent_id: 'test-hist-6j', commercial_name: 'Zacharie Groch', formation_nom: 'Formation de test (historique)' }],
+      ['test-hist-20j', ago(20), contactId, { statut: 'ouvert', commercial_name: 'Dethie Faye', formation_nom: 'Ancienne formation (hors fenêtre)' }],
+      ['test-hist-autre', ago(1), '0', { statut: 'ouvert', commercial_name: 'Dethie Faye', formation_nom: 'Autre contact' }],
+    ]
+    for (const [id, at, cid, over] of hist) {
+      await kv('SET', `email_track:${id}`, JSON.stringify({ ...base, contact_id: cid, kind: 'initial', sujet: `[TEST-SEED] historique ${id}`, sent_at: new Date(at).toISOString(), ...over }))
+      await kv('ZADD', `idx:contact:${cid}`, at, id)
       ids.push(id)
     }
   }
@@ -362,7 +382,7 @@ async function checkSlack(): Promise<void> {
 async function main(): Promise<void> {
   assertTestKv()
   const [cmd = 'seed', ...args] = process.argv.slice(2)
-  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'), args.includes('--clicks'), args.includes('--purge'), args.includes('--relances'))
+  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'), args.includes('--clicks'), args.includes('--purge'), args.includes('--relances'), args.includes('--historique'))
   if (cmd === 'webhook') return webhook(args[0], args[1], args.slice(2))
   if (cmd === 'clean') return clean()
   if (cmd === 'check-slack') return checkSlack()

@@ -1,9 +1,11 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { linkWarnings } from '@/lib/render-mail'
 
 // Fenêtre de relance d'un mail (ouverte depuis /suivi ou depuis le lien du DM Slack J+3) :
-// objet et texte pré-remplis, modifiables, régénérables par Claude, puis envoi dans le fil du
+// objet et texte pré-remplis, modifiables, rédigés une seule fois par Claude (le bouton disparaît
+// ensuite, le texte reste modifiable à la main), puis envoi dans le fil du
 // mail d'origine. Le serveur refait tous les contrôles (auteur, une seule relance, statut).
 
 interface Draft {
@@ -12,6 +14,7 @@ interface Draft {
   corps: string
   statut: string
   corpsOrigineManquant: boolean
+  redigeeParClaude: boolean
   ps: { nom: string; email: string }
   formation: string
   envoyeLe: string
@@ -69,15 +72,19 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
   const [error, setError] = useState('')
   const [loadError, setLoadError] = useState('')
   const [generating, setGenerating] = useState(false)
+  // Claude a déjà rédigé cette relance (ici ou ailleurs) : plus de bouton de rédaction
+  const [redigee, setRedigee] = useState(false)
   const [sending, setSending] = useState(false)
   const [sent, setSent] = useState(false)
   const sendingRef = useRef(false)
+  // Liens mal formés (même contrôle que l'étape 5 de l'envoi), non bloquant
+  const warnings = useMemo(() => linkWarnings(corps), [corps])
   // Clé d'idempotence de cette relance : un double clic ou un renvoi n'envoie qu'une relance
   const keyRef = useRef(typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))
 
   useEffect(() => {
     call(`/api/relance?id=${encodeURIComponent(id)}`)
-      .then((d: Draft) => { setDraft(d); setSujet(d.sujet); setCorps(d.corps) })
+      .then((d: Draft) => { setDraft(d); setSujet(d.sujet); setCorps(d.corps); setRedigee(d.redigeeParClaude) })
       .catch((e) => setLoadError(e.message))
   }, [id])
 
@@ -89,6 +96,7 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }),
       })
       setCorps(d.corps)
+      setRedigee(true)
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -159,7 +167,9 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
               {draft.corpsOrigineManquant && (
                 <div className="flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-200 rounded-lg text-xs text-zinc-700">
                   <Icon.Warning />
-                  <span>Le texte du mail d'origine n'est plus disponible : complète la relance toi-même ou fais-la rédiger par Claude.</span>
+                  <span>{redigee
+                    ? "Le texte du mail d'origine n'est plus disponible : il n'est pas repris dans la relance."
+                    : "Le texte du mail d'origine n'est plus disponible : complète la relance toi-même ou fais-la rédiger par Claude."}</span>
                 </div>
               )}
               <div>
@@ -174,13 +184,17 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-xs font-medium text-zinc-500">Texte de la relance</label>
-                  <button
-                    onClick={regenerate}
-                    disabled={generating || sending}
-                    className="flex items-center gap-1.5 text-xs text-zinc-600 hover:text-zinc-900 disabled:opacity-40"
-                  >
-                    {generating ? <><Icon.Loader /> Rédaction en cours...</> : <><Icon.Sparkle /> Rédiger avec Claude</>}
-                  </button>
+                  {redigee ? (
+                    <span className="text-xs text-zinc-400">Rédigée par Claude · modifiable à la main</span>
+                  ) : (
+                    <button
+                      onClick={regenerate}
+                      disabled={generating || sending}
+                      className="flex items-center gap-1.5 text-xs text-zinc-600 hover:text-zinc-900 disabled:opacity-40"
+                    >
+                      {generating ? <><Icon.Loader /> Rédaction en cours...</> : <><Icon.Sparkle /> Rédiger avec Claude</>}
+                    </button>
+                  )}
                 </div>
                 <textarea
                   value={corps}
@@ -189,6 +203,19 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
                   className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y"
                 />
               </div>
+              {warnings.length > 0 && (
+                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-800" data-alerte="liens">
+                  <div className="flex items-start gap-2 font-medium">
+                    <Icon.Warning />
+                    <span>{warnings.length === 1 ? 'Un lien à vérifier' : `${warnings.length} liens à vérifier`} avant l'envoi</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 space-y-1">
+                    {warnings.map((w, i) => (
+                      <li key={i}><span className="font-mono bg-white/60 px-1 rounded">{w.extrait}</span> : {w.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <p className="text-xs text-zinc-500">
                 Envoi vers <strong>{draft.ps.email}</strong> · De la part de <strong>{draft.commercial}</strong> · dans la même conversation que le mail d'origine
               </p>

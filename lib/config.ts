@@ -66,3 +66,6 @@ export const HUBSPOT_RETRY_MAX_ATTEMPTS = 4
 
 // Relance J+3 par DM Slack : nombre d'essais si Slack échoue (un par passage du cron)
 export const SLACK_RELANCE_MAX_ATTEMPTS = 3
+
+// Alerte « déjà contacté » à l'étape 4 : envois au même contact sur les N derniers jours
+export const CONTACT_HISTORY_DAYS = 14

@@ -80,7 +80,8 @@ medere-agent-email/
 │       ├── formations/route.ts           # Liste des formations actives
 │       ├── sessions/route.ts             # Sessions par formation
 │       ├── contact-search/route.ts       # Recherche contacts HubSpot (502 si HubSpot indisponible)
-│       ├── generate/route.ts             # Génération mail via Claude (+ upsell)
+│       ├── contact-history/route.ts      # Envois des 14 derniers jours au contact (« déjà contacté »)
+│       ├── generate/route.ts             # Rédaction du mail par Claude au fil de l'eau (NDJSON, + upsell)
 │       ├── send/route.ts                 # Envoi (contrôles) → lib/deliver.ts
 │       ├── relance/route.ts              # Brouillon de relance (GET), generate/ (Claude), send/ (envoi dans le fil)
 │       ├── suivi/route.ts                # API lecture KV pour page suivi
@@ -94,9 +95,10 @@ medere-agent-email/
 ├── lib/
 │   ├── airtable.ts                       # Fonctions Airtable
 │   ├── deliver.ts                        # Chaîne d'envoi commune (Resend, suivi, copie, Note, rejeu)
+│   ├── generated-mail.ts                 # Lecture du mail rédigé par Claude (objet + texte, au fil de l'eau)
 │   ├── note-queue.ts                     # Notes HubSpot en échec : nouveaux essais, alerte
 │   ├── relance.ts                        # Règles et brouillon de la relance par mail
-│   ├── render-mail.ts                    # Rendu texte → HTML + texte brut (fonction pure)
+│   ├── render-mail.ts                    # Rendu texte → HTML + texte brut, avertissements sur les liens (fonctions pures)
 │   ├── slack.ts                          # DM Slack et alertes techniques
 │   ├── auth.ts                           # Session JWT (cookie)
 │   ├── claude.ts                         # Génération mail IA
@@ -178,9 +180,12 @@ Sessions filtrées par :
 **Étape 4 — Contact PS**
 Recherche dans HubSpot par nom, prénom, email ou RPPS. Sélection du titre de politesse (Docteur / Madame / Monsieur).
 Si HubSpot ne répond pas, l'app affiche « HubSpot indisponible, ne crée pas le contact » (et non « Aucun contact trouvé »), pour éviter de créer des doublons.
+**Alerte « déjà contacté »** : dès qu'un contact est choisi, `/api/contact-history` lit `idx:contact:{id}` et liste les envois à ce contact des **14 derniers jours** (`CONTACT_HISTORY_DAYS`), tous commerciaux confondus : mail ou relance, qui, quand, quelle formation, quel statut (Envoyé, Reçu, Ouvert, Cliqué, Adresse invalide, Indésirable). Non bloquante. Si la vérification échoue, un message invite à consulter le suivi.
 
 **Étape 5 — Aperçu**
-Mail généré par Claude, modifiable avant envoi.
+- **Rédaction au fil de l'eau** : l'étape 5 s'ouvre dès que le serveur répond ; l'objet puis le texte s'écrivent progressivement pendant que Claude rédige (`/api/generate` répond en NDJSON : `start`, `delta`, `done` ou `error` ; format demandé à Claude : « Objet : … », ligne vide, texte — lu par `lib/generated-mail.ts`). Pendant la rédaction, les champs sont en lecture seule et l'envoi désactivé ; « Retour » annule la rédaction (le serveur arrête Claude). En cas d'échec, retour à l'étape 4 avec « La rédaction du mail a échoué. Réessaie. ».
+- **Onglets « Texte » / « Aperçu »** : l'aperçu affiche le mail **tel qu'il sera reçu** (De, À, Objet, puis le HTML produit par la même fonction `renderMail` que l'envoi, avec l'apparence par défaut d'une messagerie). Un clic sur un lien de l'aperçu l'ouvre dans un nouvel onglet.
+- **Avertissements sur les liens** (`linkWarnings`, `lib/render-mail.ts`), non bloquants, aussi dans la fenêtre de relance : lien sans texte ou sans adresse, espace dans l'adresse, adresse ne commençant ni par `https://` ni par `www.`, parenthèse manquante, texte entre crochets sans adresse (« [Lien d'inscription] »), protocole mal écrit (`htps://`, `https:/`, `https//`), extension de site manquante (`www.agencedpc/…`).
 
 **Étape 6 — Confirmation**
 Statuts : mail envoyé ✓, Note HubSpot sur la fiche du PS ✓, relance J+3 ✓.
@@ -332,8 +337,14 @@ Une seule fonction, `renderMail` (`lib/render-mail.ts`, sans dépendance), produ
 Dans le détail d'un mail, bouton **« Relancer »** (ou lien « Préparer la relance par mail » du DM J+3, qui ouvre `/suivi?relance={resend_id}`). La fenêtre de relance propose :
 - objet `Relance : votre formation {nom de la formation}` ;
 - texte pré-rempli : formule d'appel (« Bonjour {titre} {nom}, »), une introduction adaptée au statut — **non ouvert**, **ouvert sans clic** ou **cliqué** —, la signature, puis « ----- Mon précédent message ----- » et le mail d'origine ;
-- tout est modifiable, et **« Rédiger avec Claude »** régénère une relance adaptée au statut (même limite de débit que la génération) ;
+- tout est modifiable ; **« Rédiger avec Claude »** rédige une relance adaptée au statut (même limite de débit que la génération), **une seule fois par mail d'origine** : le bouton disparaît ensuite (« Rédigée par Claude · modifiable à la main »), le texte reste modifiable à la main ;
 - corps d'origine : `email_body` (90 jours), sinon redemandé à Resend ; s'il n'est plus disponible, la relance s'ouvre **sans le corps d'origine** avec un message, à compléter ou à faire rédiger par Claude.
+
+Rédaction unique, contrôlée côté serveur (`/api/relance/generate`) :
+- à la première rédaction, le texte de Claude est enregistré dans `relance_draft:{resend_id}` (supprimé avec l'envoi par la purge RGPD) ;
+- tout appel suivant pour ce mail — rechargement, autre onglet, administrateur, appel direct — renvoie ce brouillon **sans appeler Claude** (`dejaRedigee: true`, journal « Brouillon déjà rédigé renvoyé, sans appel à Claude ») ; `GET /api/relance` pré-remplit la fenêtre avec ce texte (`redigeeParClaude: true`) ;
+- verrou atomique `relance_gen_lock:{resend_id}` (SET NX, 180 s) : deux demandes simultanées ne font **qu'un appel à Claude**, la seconde attend le brouillon de la première ;
+- si Claude échoue, le verrou est libéré (script `RELEASE_LOCK_SCRIPT`, seulement par son propriétaire) et rien n'est enregistré : un nouvel essai est possible.
 
 Règles (vérifiées côté serveur à la préparation **et** à l'envoi — `lib/relance.ts`) :
 - **une seule relance par mail** (verrou `relance_lock:{id}` + `relance_id` sur le mail d'origine) ; un double clic ou un rejeu de la même requête renvoie la même relance ;
@@ -404,6 +415,8 @@ Les noms de clés et les scripts Lua sont centralisés dans `lib/kv-schema.ts`. 
 | `hubspot_note:{resend_id}:{opened\|clicked}` | flag | Verrou « une seule Note HubSpot par type d'événement » (`legacy` pour les entrées antérieures) | aucune — purge RGPD | webhook, migration |
 | `relance:{timestamp}` | JSON | **Ancien format** de relance, repris par la migration | ≈ J+7 | (plus écrit) |
 | `relance_lock:{resend_id}` | string | Verrou « une seule relance » (valeur = clé d'idempotence de la relance) | 24 h | `/api/relance/send` |
+| `relance_draft:{resend_id}` | JSON | Relance rédigée par Claude (`corps`, `generated_at`, `generated_by`) : une seule rédaction par mail | rétention RGPD, supprimée avec l'envoi | `/api/relance/generate` |
+| `relance_gen_lock:{resend_id}` | string | Verrou de rédaction (un seul appel à Claude à la fois) | 180 s | `/api/relance/generate` |
 | `slack_relance_attempts:{membre}` | compteur | Essais du DM J+3 quand Slack échoue | 7 jours | cron |
 | `hubspot_retry` / `hubspot_retry:{id}` | sorted set / JSON | Notes HubSpot en échec à retenter (score = prochain essai) | membre retiré une fois traité / 7 jours | `/api/send`, relance, webhook, cron |
 | `cache:airtable:formations:v1`, `cache:airtable:sessions:v1` | JSON | Tables Airtable lues en entier | 5 minutes | `/api/formations`, `/api/sessions` |

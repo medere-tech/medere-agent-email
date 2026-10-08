@@ -25,6 +25,8 @@ export const KEYS = {
   noteLock: (id: string, kind: 'opened' | 'clicked') => `hubspot_note:${id}:${kind}`,
   clicks: (id: string) => `email_clicks:${id}`,
   relanceLock: (parentId: string) => `relance_lock:${parentId}`,
+  relanceDraft: (parentId: string) => `relance_draft:${parentId}`,
+  relanceGenLock: (parentId: string) => `relance_gen_lock:${parentId}`,
   hubspotRetry: 'hubspot_retry',
   emailsIndex: 'emails_index',
   byCommercial: (key: string) => `idx:commercial:${key}`,
@@ -417,6 +419,12 @@ return 1
 
 // Pose un champ une seule fois (ex. click_notified_at : un seul DM de premier clic par envoi)
 // KEYS : 1 track ; ARGV : 1 champ, 2 valeur. Retour : 1 posé maintenant, 0 déjà posé ou envoi inconnu
+// Libère un verrou seulement s'il appartient encore à celui qui l'a pris (KEYS[1] = verrou, ARGV[1] = jeton)
+export const RELEASE_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0
+`
+
 export const MARK_ONCE_SCRIPT = LUA_COMMON + `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end

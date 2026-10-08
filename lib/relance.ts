@@ -126,3 +126,16 @@ export function relanceDraft(entry: Record<string, any>, body: string | null, se
   if (body) parts.push('', '----- Mon précédent message -----', '', body.trim())
   return parts.join('\n')
 }
+
+// Relance rédigée par Claude : une seule génération par mail d'origine. Le brouillon est gardé
+// (relance_draft:{id}, purgé avec l'envoi) et renvoyé à toute demande suivante, sans appel à Claude.
+export interface StoredRelance {
+  corps: string
+  generated_at: string
+  generated_by: string
+}
+
+export async function storedRelance(id: string): Promise<StoredRelance | null> {
+  const d = await getKv().get<StoredRelance>(KEYS.relanceDraft(id))
+  return d && typeof d.corps === 'string' && d.corps ? d : null
+}

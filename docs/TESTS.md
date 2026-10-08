@@ -230,6 +230,35 @@ Données : `seed --relances` (envois de la fiche Dethie Faye, relance J+3 due : 
 | L12 | `HUBSPOT_TOKEN` faussé : 2 Notes en échec, cron avec échéance forcée ×3 ; jeton restauré, cron | file `hubspot_retry` (essais 1 → 3) ; 4e essai : Note abandonnée + DM « échec définitif » + récapitulatif ; après restauration : Note créée, file vide — **SHA-256 de `.env.local` identique** |
 | L13 | Performance (production locale) | première passe de recherche ~280–330 ms côté API ; premier résultat affiché ~780–1 040 ms après la frappe (dont 350 ms d'attente de frappe) |
 
+### L-bis. Relance : une seule rédaction par Claude par mail
+
+Données : `seed --relances`. Journaux du serveur : « Appel à Claude pour la relance de … », « Brouillon déjà rédigé renvoyé, sans appel à Claude », « Rédaction déjà en cours, attente du brouillon ».
+
+| # | Étapes | Attendu |
+|---|---|---|
+| LB1 | `/suivi?relance=test-rel-ouvert`, « Rédiger avec Claude » | texte remplacé ; le bouton disparaît, « Rédigée par Claude · modifiable à la main » ; `relance_draft:test-rel-ouvert` créé |
+| LB2 | Recharger la page | pas de bouton, même texte (`redigeeParClaude: true`) |
+| LB3 | `POST /api/relance/generate` direct (même mail) | 200 `dejaRedigee: true`, même texte ; journal « déjà rédigé », **aucun** « Appel à Claude » |
+| LB4 | Deux `POST` simultanés sur `test-rel-clique` | deux 200, même texte ; **un seul** « Appel à Claude », une « attente du brouillon » |
+| LB5 | `ANTHROPIC_API_KEY` faussée (sauvegarde de `.env.local`), `POST` sur `test-rel-non-ouvert` ; clé restaurée, nouveau `POST` | 500 « La rédaction de la relance a échoué. Réessaie. », ni verrou ni brouillon ; puis 200, texte rédigé — **SHA-256 de `.env.local` identique** |
+
+### M. Aperçu, liens, déjà contacté, rédaction au fil de l'eau (lot 5)
+
+Contrôles par lecture de la page (DOM). Données : `seed --historique` (contact de test : envois il y a 2 jours, 6 jours + relance à 4 jours, 20 jours ; un envoi récent à un autre contact).
+
+| # | Étapes | Attendu |
+|---|---|---|
+| M0 | Tests Node : `linkWarnings` et `parseGeneratedMail` (25 cas) + `renderMail` (19 cas) | tous OK |
+| M1 | Étape 4, choisir le contact de test | « Déjà contacté ces 14 derniers jours » : 3 lignes (mail Dethie Faye / Ouvert, relance Zacharie / Reçu, mail Zacharie / Cliqué), du plus récent au plus ancien ; ni l'envoi de 20 jours ni l'autre contact |
+| M2 | « Générer le mail » | l'étape 5 s'ouvre tout de suite, l'objet puis le texte s'écrivent progressivement (dizaines de mises à jour) ; champs en lecture seule et envoi désactivé pendant la rédaction |
+| M3 | Onglet « Aperçu » | De / À / Objet, liens cliquables (`https://www.agencedpc.fr/professionnel/`), aucun lien imbriqué |
+| M4 | Ajouter « [Lien d'inscription] », « htps://medere.fr », « www.agencedpc/pro », « [le site](medere.fr) », « [ok](https://medere.fr) » | 4 avertissements (le lien correct n'en a pas) ; texte d'origine remis → plus d'avertissement |
+| M5 | Envoi réel `[TEST-L5-A]` ; comparer l'aperçu au HTML lu chez Resend | **identique** |
+| M6 | Nouveau mail, « Retour » pendant la rédaction | retour à l'étape 4 sans erreur, contact conservé, aucune erreur dans les journaux |
+| M7 | `ANTHROPIC_API_KEY` faussée, « Générer le mail » ; clé restaurée | retour à l'étape 4 avec « La rédaction du mail a échoué. Réessaie. » — SHA-256 identique |
+| M8 | Fenêtre de relance : ajouter « https:/medere.fr » | avertissement « Adresse mal écrite » |
+| M9 | Performance (production locale) | voir le rapport du lot 5 |
+
 ### G. Non-régression complète
 
 Connexion Google → génération → envoi → `opened` → `clicked` → `/suivi` (statut « Cliqué », dates) → déconnexion.

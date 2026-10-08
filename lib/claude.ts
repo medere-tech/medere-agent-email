@@ -1,6 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk'
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
+// Clé lue à chaque appel (comme le jeton HubSpot) : un changement de clé est pris en compte sans redémarrage
+let cached: { key: string; client: Anthropic } | null = null
+function anthropic(): Anthropic {
+  const key = process.env.ANTHROPIC_API_KEY || ''
+  if (!cached || cached.key !== key) cached = { key, client: new Anthropic({ apiKey: key }) }
+  return cached.client
+}
 
 export interface GenerateMailParams {
   commercial: { name: string; email: string; phone?: string }
@@ -16,7 +22,9 @@ export interface GenerateMailParams {
   formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string; url_webflow?: string }>
 }
 
-export async function generateMail(params: GenerateMailParams): Promise<{ sujet: string; corps: string }> {
+// Prompt du mail initial. Réponse attendue en texte : « Objet : … », une ligne vide, puis le mail
+// (format lisible au fil de l'eau pour l'affichage progressif, voir lib/generated-mail.ts).
+function buildMailPrompt(params: GenerateMailParams): string {
   const { commercial, formation, sessions, ps, formationsLiees } = params
 
   const sessionsText = sessions
@@ -38,7 +46,7 @@ export async function generateMail(params: GenerateMailParams): Promise<{ sujet:
         }).join('\n')}`
       : ''
 
-  const prompt = `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.
+  return `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.
 Tu dois rédiger un email professionnel, chaleureux et clair pour un professionnel de santé (PS) qui a manifesté son intérêt par téléphone.
 
 CONTEXTE :
@@ -84,27 +92,25 @@ STYLE :
 - Si tu dois utiliser des tirets, utilise des tirets courts (-) et n'utilise jamais de tirets longs
 
 
-Réponds UNIQUEMENT avec un JSON valide dans ce format exact :
-{
-  "sujet": "...",
-  "corps": "..."
-}
-Le corps doit être en texte brut (pas de HTML), avec des retours à la ligne normaux.`
+FORMAT DE RÉPONSE (obligatoire, rien avant ni après) :
+Objet : <l'objet du mail, sur une seule ligne>
 
-  const msg = await client.messages.create({
+<le texte complet du mail>
+
+Le texte est en texte brut (pas de HTML, pas de Markdown), avec des retours à la ligne normaux.`
+}
+
+// Rédaction du mail initial, transmise au fil de l'eau (morceaux de texte bruts)
+export async function* streamMail(params: GenerateMailParams): AsyncGenerator<string> {
+  const stream = await anthropic().messages.create({
     model: 'claude-opus-4-6',
     max_tokens: 1500,
-    messages: [{ role: 'user', content: prompt }],
+    stream: true,
+    messages: [{ role: 'user', content: buildMailPrompt(params) }],
   })
-
-  const text = msg.content[0].type === 'text' ? msg.content[0].text : ''
-  
-  // Extract JSON from response
-  const jsonMatch = text.match(/\{[\s\S]*\}/)
-  if (!jsonMatch) throw new Error('Claude did not return valid JSON')
-  
-  const result = JSON.parse(jsonMatch[0])
-  return { sujet: result.sujet, corps: result.corps }
+  for await (const event of stream) {
+    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') yield event.delta.text
+  }
 }
 
 function formatDate(dateStr: string): string {
@@ -160,7 +166,7 @@ ${originalBody ? `Après la signature, ajoute exactement la ligne "----- Mon pr�
 
 Réponds UNIQUEMENT avec le texte complet de la relance.`
 
-  const msg = await client.messages.create({
+  const msg = await anthropic().messages.create({
     model: 'claude-opus-4-6',
     max_tokens: 2500,
     messages: [{ role: 'user', content: prompt }],

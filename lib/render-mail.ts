@@ -98,3 +98,55 @@ export function renderMail(input: string): RenderedMail {
     .join('')
   return { html, text }
 }
+
+// ─── Avertissements sur les liens mal formés (aperçu, avant l'envoi) ─────────────
+// Non bloquants : le commercial reste libre d'envoyer. Chaque avertissement cite l'extrait fautif.
+export interface LinkWarning {
+  extrait: string
+  message: string
+}
+
+const MD_ANY = /\[([^\]\n]*)\]\(([^)\n]*)\)/g
+const MD_UNCLOSED = /\[[^\]\n]+\]\([^)\n]*$/gm
+const BRACKETS_ONLY = /\[([^\]\n]{1,60})\](?!\()/g
+const BAD_PROTOCOL = /\b(?:h?t?tps?:\/(?!\/)|https?\/\/|https?:\\|htps?:\/\/|htp:\/\/|hhtps?:\/\/)[^\s<>"]*/gi
+
+function cut(s: string): string {
+  return s.length > 60 ? s.slice(0, 57) + '…' : s
+}
+
+export function linkWarnings(input: string): LinkWarning[] {
+  const text = String(input || '').replace(/\r\n?/g, '\n')
+  const out: LinkWarning[] = []
+  const add = (extrait: string, message: string) => {
+    if (!out.some((w) => w.extrait === cut(extrait) && w.message === message)) out.push({ extrait: cut(extrait), message })
+  }
+
+  // Liens Markdown [texte](adresse)
+  for (const m of Array.from(text.matchAll(MD_ANY))) {
+    const [all, label, url] = m
+    const u = url.trim()
+    if (!label.trim()) add(all, 'Lien sans texte : le PS verra un lien vide.')
+    if (!u) add(all, "Lien sans adresse : ajoute l'adresse entre les parenthèses.")
+    else if (/\s/.test(u)) add(all, "Espace dans l'adresse du lien : le lien ne fonctionnera pas.")
+    else if (!/^(?:https?:\/\/|www\.)/i.test(u)) add(all, "Adresse de lien incomplète : elle doit commencer par https:// ou www. Le texte s'affichera tel quel, sans lien.")
+  }
+  for (const m of Array.from(text.matchAll(MD_UNCLOSED))) add(m[0], 'Lien non fermé : il manque la parenthèse fermante.')
+  for (const m of Array.from(text.matchAll(BRACKETS_ONLY))) {
+    add(m[0], "Texte entre crochets sans adresse : lien à compléter ? Il s'affichera tel quel.")
+  }
+
+  // Adresses mal écrites (protocole)
+  for (const m of Array.from(text.matchAll(BAD_PROTOCOL))) add(trimUrl(m[0]).url || m[0], "Adresse mal écrite : le début doit être exactement https:// (ou www.).")
+
+  // Adresses sans extension (www.agencedpc, https://medere)
+  for (const s of segment(text)) {
+    if (s.kind !== 'link') continue
+    // Déjà signalé dans un lien Markdown mal formé : pas de second avertissement
+    if (out.some((w) => w.extrait.includes(s.url))) continue
+    const host = s.url.replace(/^https?:\/\//i, '').split(/[/?#]/)[0]
+    const bare = host.replace(/^www\./i, '')
+    if (!bare || !/\.[a-z]{2,}$/i.test(bare)) add(s.url, "Adresse incomplète : l'extension du site (.fr, .com…) semble manquer.")
+  }
+  return out
+}
