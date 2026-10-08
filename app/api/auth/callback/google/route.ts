@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createSession } from '@/lib/auth'
+import { OAUTH_STATE_COOKIE, OAUTH_STATE_PATH, createSession } from '@/lib/auth'
+
+// Redirection qui efface toujours le cookie du `state` (usage unique)
+function redirectTo(path: string, req: NextRequest) {
+  const response = NextResponse.redirect(new URL(path, req.url))
+  response.cookies.set(OAUTH_STATE_COOKIE, '', { path: OAUTH_STATE_PATH, maxAge: 0 })
+  return response
+}
 
 export async function GET(req: NextRequest) {
   if (!process.env.NEXTAUTH_SECRET) {
@@ -12,7 +19,15 @@ export async function GET(req: NextRequest) {
   const error = searchParams.get('error')
 
   if (error || !code) {
-    return NextResponse.redirect(new URL('/login?error=access_denied', req.url))
+    return redirectTo('/login?error=access_denied', req)
+  }
+
+  // Le `state` renvoyé par Google doit être celui posé par /api/auth/login (cookie httpOnly)
+  const state = searchParams.get('state')
+  const expectedState = req.cookies.get(OAUTH_STATE_COOKIE)?.value
+  if (!state || !expectedState || state !== expectedState) {
+    console.warn('[AUTH] Paramètre state absent ou invalide, connexion refusée')
+    return redirectTo('/login?error=invalid_state', req)
   }
 
   try {
@@ -42,7 +57,7 @@ export async function GET(req: NextRequest) {
 
     // Vérifier le domaine @medere.fr
     if (!user.email?.endsWith('@medere.fr') || !user.verified_email) {
-      return NextResponse.redirect(new URL('/login?error=unauthorized_domain', req.url))
+      return redirectTo('/login?error=unauthorized_domain', req)
     }
 
     // Créer la session
@@ -52,9 +67,9 @@ export async function GET(req: NextRequest) {
       picture: user.picture,
     })
 
-    return NextResponse.redirect(new URL('/', req.url))
+    return redirectTo('/', req)
   } catch (e) {
     console.error('[AUTH] Callback error:', e)
-    return NextResponse.redirect(new URL('/login?error=server_error', req.url))
+    return redirectTo('/login?error=server_error', req)
   }
 }

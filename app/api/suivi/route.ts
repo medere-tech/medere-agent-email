@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getKv, kvConfigured } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 import { isMigrated, parisDay, statsFromCounters, statsFromEntries, type Stats } from '@/lib/tracking'
+import { requireActor } from '@/lib/identity'
 
 // Lecture du KV à chaque appel : jamais de rendu statique au build, jamais de réponse
 // gardée en cache par le navigateur (sinon "Actualiser" peut réafficher d'anciens chiffres)
@@ -9,6 +10,9 @@ export const dynamic = 'force-dynamic'
 const NO_STORE = { 'Cache-Control': 'no-store' }
 
 export async function GET(req: NextRequest) {
+  // Tout utilisateur connecté (lecteur compris) voit le suivi ; un compte « Plus actif » est refusé
+  const guard = await requireActor({ readOnly: true })
+  if (!guard.ok) return guard.response
   try {
     if (!kvConfigured()) {
       return NextResponse.json({ error: "Le suivi est momentanément indisponible. Réessaie dans quelques instants." }, { status: 500 })

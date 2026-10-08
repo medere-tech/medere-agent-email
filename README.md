@@ -72,8 +72,10 @@ medere-agent-email/
 │   │   └── page.tsx                      # Page suivi des envois
 │   └── api/
 │       ├── auth/
-│       │   ├── callback/google/route.ts  # Callback OAuth Google (GET)
+│       │   ├── login/route.ts            # Démarre la connexion Google (paramètre state)
+│       │   ├── callback/google/route.ts  # Callback OAuth Google (GET, vérifie le state)
 │       │   └── logout/route.ts           # Déconnexion (POST uniquement)
+│       ├── me/route.ts                   # Rôle et fiche de la personne connectée
 │       ├── commerciaux/route.ts          # Liste des commerciaux actifs
 │       ├── formations/route.ts           # Liste des formations actives
 │       ├── sessions/route.ts             # Sessions par formation
@@ -93,6 +95,9 @@ medere-agent-email/
 │   ├── claude.ts                         # Génération mail IA
 │   ├── config.ts                         # Constantes (RETENTION_DAYS, seuil des événements automatiques…)
 │   ├── hubspot.ts                        # Recherche contacts + Notes HubSpot
+│   ├── identity.ts                       # Personne connectée, rôle, contrôle d'accès des routes
+│   ├── ratelimit.ts                      # Limites de débit (KV)
+│   ├── roles.ts                          # Règles des rôles et choix de l'expéditeur (fonctions pures)
 │   ├── kv.ts                             # Client Upstash Redis (KV_REST_API_URL / KV_REST_API_TOKEN)
 │   ├── kv-schema.ts                      # Noms de clés KV, jours, scripts Lua atomiques (sans import)
 │   └── tracking.ts                       # Enregistrement des envois, événements webhook, stats, purge RGPD
@@ -152,7 +157,7 @@ medere-agent-email/
 ### Les 6 étapes du formulaire
 
 **Étape 1 — Commercial**
-Sélection du commercial parmi la liste Airtable (filtre `{Statut}="Actif"`).
+Commercial connecté présélectionné et verrouillé ; un administrateur peut choisir n'importe quel commercial actif (voir « Rôles et accès »).
 
 **Étape 2 — Formation**
 Sélection de la formation : formations `Active` avec numéro DPC (voir la constante `FORMATIONS_REQUIRE_FUTURE_SESSION` dans la section Airtable).
@@ -184,10 +189,11 @@ Google OAuth 2.0 natif — aucune librairie d'auth. JWT signé avec `jose`.
 
 ### Flux
 1. Utilisateur non connecté → redirigé vers `/login`
-2. Clic "Se connecter avec Google" → Google OAuth
-3. Vérification côté serveur que l'email est `@medere.fr` et vérifié
-4. Cookie de session JWT créé (httpOnly, secure en production, 7 jours)
-5. Middleware vérifie le cookie sur chaque requête
+2. Clic « Se connecter avec Google » → `GET /api/auth/login` : génère un paramètre `state` aléatoire, le garde dans un cookie httpOnly (`medere_oauth_state`, 10 minutes, limité à `/api/auth`) et redirige vers Google
+3. Retour sur `/api/auth/callback/google` : le `state` renvoyé par Google doit être celui du cookie, sinon `/login?error=invalid_state` (« La connexion a expiré ou a été interrompue. Recommence. ») ; le cookie est effacé dans tous les cas (usage unique). Protège contre la connexion forcée (login CSRF).
+4. Vérification côté serveur que l'email est `@medere.fr` et vérifié
+5. Cookie de session JWT créé (httpOnly, secure en production, 7 jours)
+6. Middleware vérifie le cookie sur chaque requête ; chaque route métier relit ensuite **le rôle** de la personne (voir « Rôles et accès »)
 
 ### Déconnexion
 Bouton « Se déconnecter » dans le header de la page principale et de `/suivi`.
@@ -199,7 +205,7 @@ Il envoie un `POST /api/auth/logout` (un simple lien GET ne peut pas déconnecte
 const SESSION_DURATION = 60 * 60 * 24 * 7 // 7 jours (JWT et maxAge du cookie)
 ```
 
-> **La session n'est pas révocable.** Le JWT est autonome (aucune liste de sessions côté serveur) : il reste valide jusqu'à son expiration, même si le compte Google est désactivé entre-temps. Un compte désactivé garde donc l'accès à l'app **jusqu'à 7 jours** après sa dernière connexion. Seul le bouton « Se déconnecter » supprime le cookie, et uniquement sur le navigateur concerné.
+> Le JWT de session reste valide 7 jours, mais **l'accès d'un commercial est révocable** : passer sa fiche Airtable en « Plus actif » le bloque partout (génération, envoi, suivi) en moins de 60 secondes, même avec une session valide (voir « Rôles et accès »). Un compte `@medere.fr` sans fiche garde, lui, l'accès en lecture au suivi jusqu'à l'expiration de sa session.
 
 ### Sécurité
 - Cookie `httpOnly` — inaccessible via JavaScript
@@ -210,7 +216,31 @@ const SESSION_DURATION = 60 * 60 * 24 * 7 // 7 jours (JWT et maxAge du cookie)
 - `NEXTAUTH_SECRET` absent → 500 explicite (log `[AUTH] NEXTAUTH_SECRET manquant`) au lieu d'une signature avec une clé vide
 
 ### Couper l'accès à un commercial
-Désactiver son compte Google Workspace `@medere.fr` — il ne pourra plus se **reconnecter**, mais une session déjà ouverte n'est pas révocable : il **garde l'accès jusqu'à 7 jours** (expiration de son JWT). Pour une coupure immédiate de tous les accès, changer `NEXTAUTH_SECRET` sur Vercel et redéployer : toutes les sessions deviennent invalides et tous les utilisateurs doivent se reconnecter.
+1. Airtable → table Commerciaux → passer son `Statut` à « Plus actif » : il est bloqué partout **en moins de 60 secondes**, même avec une session ouverte (message « Ton accès à l'Agent Mail a été désactivé »).
+2. Désactiver son compte Google Workspace `@medere.fr` : il ne pourra plus se reconnecter.
+
+Pour une coupure immédiate de **tous** les accès, changer `NEXTAUTH_SECRET` sur Vercel et redéployer : toutes les sessions deviennent invalides.
+
+### Rôles et accès
+Le rôle est déterminé **côté serveur** à chaque requête, à partir de l'email de la session Google rapproché de la table Commerciaux (champ `email`, sans tenir compte de la casse). Le navigateur ne fournit jamais l'identité du commercial : `/api/generate` et `/api/send` ne reçoivent que l'identifiant de la fiche choisie à l'étape 1 (`commercial_id`) et relisent nom, email, owner HubSpot et Slack dans Airtable.
+
+| Rôle | Qui | Étape 1 | Générer / envoyer | Suivi |
+|---|---|---|---|---|
+| Administrateur | email dans `ADMIN_EMAILS` (`lib/config.ts`, actuellement `dethie@medere.fr`) | n'importe quel commercial actif (sa fiche par défaut) | au nom de n'importe quel commercial actif — **tracé** : `sent_by` / `sent_by_name` dans `email_track`, ligne « Envoyé par … pour le compte de … » dans la Note HubSpot | tout |
+| Commercial | fiche « Actif » | sa fiche, présélectionnée et **verrouillée** | uniquement en son nom (un autre identifiant envoyé → 403 « Tu ne peux générer et envoyer des mails qu'en ton nom. ») | tout |
+| Lecteur | compte `@medere.fr` sans fiche | — (message « Ton compte n'est pas associé à une fiche commercial… ») | non (403) | lecture seule |
+| Désactivé | fiche « Plus actif » (administrateur compris) | — | non (403) | non (403) |
+
+- Fiches relues dans Airtable au plus toutes les 60 secondes (`COMMERCIAL_CACHE_SECONDS`), avec un cache mémoire à durée **stricte** (le cache Next `revalidate` servirait une fiche périmée après le délai) : un passage à « Plus actif » est effectif en moins de 60 secondes, un retour à « Actif » aussi.
+- Plusieurs fiches avec le même email : la fiche « Actif » est retenue.
+- `GET /api/me` renvoie le rôle et la fiche de la personne connectée (403 si désactivée).
+- Routes métier protégées : `/api/generate`, `/api/send`, `/api/sessions`, `/api/contact-search` (administrateur et commercial) ; `/api/suivi`, `/api/formations`, `/api/commerciaux`, `/api/me` (lecteur compris).
+
+### Limites de débit
+Par personne connectée, fenêtre fixe de 10 minutes dans le KV (`ratelimit:{action}:{email}:{fenêtre}`, expirée avec la fenêtre) — `RATE_LIMITS` dans `lib/config.ts` :
+- génération : 30 / 10 min ; envoi : 20 / 10 min ;
+- au-delà : 429 « Tu as atteint la limite de 30 générations en 10 minutes. Réessaie dans N minutes. » ;
+- KV indisponible : la requête passe (journalisé `[RATELIMIT]`) plutôt que de bloquer les commerciaux.
 
 ### Google Cloud Console
 - Projet : `medere-agent-email`
@@ -241,9 +271,13 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 - Pagination complète (toutes les pages Airtable chargées)
 
 ### Cache et pagination
-- Toute requête **paginée** (formations, sessions, inscriptions, upsell) passe par `atAll()` et n'est **jamais** mise en cache (`cache: 'no-store'`), première page comprise. Une page 1 servie depuis le cache porterait un `offset` expiré et provoquerait `422 LIST_RECORDS_ITERATOR_NOT_AVAILABLE`.
-- Les requêtes à une seule page (commerciaux, recherche Clients) gardent un cache de 60 s.
-- Le cron lit toujours Airtable sans cache.
+- Toute requête **paginée** passe par `atAll()` et n'utilise **jamais** le cache HTTP de Next (`cache: 'no-store'`), première page comprise. Une page 1 servie depuis ce cache porterait un `offset` expiré et provoquerait `422 LIST_RECORDS_ITERATOR_NOT_AVAILABLE`.
+- **Formations et table Sessions complète** : le résultat complet (après pagination) est gardé 5 minutes (`AIRTABLE_CACHE_SECONDS`) en mémoire et dans le KV (`cache:airtable:formations:v1`, `cache:airtable:sessions:v1`, partagés entre instances). Relire toute la table Sessions prenait ~3 s ; une modification Airtable apparaît donc dans l'app en 5 minutes au plus. Les sessions sont filtrées par formation et par date à chaque appel (la date change chaque jour, pas le cache).
+- **Préchargement** : à l'arrivée sur l'assistant, le navigateur charge le rôle, les formations, la liste des commerciaux (administrateur) et appelle `/api/sessions?warm=1`, qui remplit le cache des sessions avant que le commercial n'arrive à l'étape 3.
+- **Fiches Commerciaux** : cache mémoire strict de 60 s (voir « Rôles et accès »).
+- La recherche Clients (une page) garde le cache Next de 60 s.
+- Le cron lit toujours Airtable sans cache (inscriptions et correspondance session → formation à jour).
+- Recherche de contact HubSpot : les passes de recherche (texte, texte sans accents, prénom + nom, mots séparés) partent **en parallèle** ; une réponse 429 de HubSpot est retentée jusqu'à 2 fois.
 
 ### Champs Airtable utilisés — Sessions
 
@@ -530,8 +564,8 @@ Les données de test se créent et se suppriment à la demande avec `scripts/see
 
 ### Ajouter un commercial
 1. Airtable → table Commerciaux → ajouter un record
-2. Renseigner : `hubspot_name`, `email`, `phone`, `slack_user_id`, `hubspot_id`, `Statut="Actif"`
-3. L'app le détecte automatiquement au prochain chargement (cache 60s)
+2. Renseigner : `hubspot_name`, `email` (**exactement l'adresse de son compte Google `@medere.fr`** : c'est elle qui rattache sa connexion à sa fiche), `phone`, `slack_user_id`, `hubspot_id`, `Statut="Actif"`
+3. L'app le reconnaît à sa prochaine requête (60 s au plus) ; il n'a qu'à se connecter avec son compte Google
 
 ### Désactiver un commercial
 1. Airtable → table Commerciaux → changer `Statut` de `Actif` à autre chose
@@ -607,9 +641,11 @@ Vérifier que le champ `Format` est bien dans les fields chargés dans `getSessi
 ### « Service momentanément indisponible. Préviens Déthié. » (erreur 500)
 `NEXTAUTH_SECRET` ou `CRON_SECRET` est absent des variables d'environnement. Logs : `[AUTH] NEXTAUTH_SECRET manquant` ou `[CRON] CRON_SECRET manquant`.
 
-### Un commercial ne peut plus se connecter
+### Un commercial ne peut plus se connecter ou voit « Ton accès à l'Agent Mail a été désactivé »
 1. Vérifier que son compte Google Workspace `@medere.fr` est actif
-2. Vérifier que son `Statut` est `Actif` dans Airtable Commerciaux
+2. Vérifier que son `Statut` est `Actif` dans Airtable Commerciaux (effet en moins de 60 s)
+3. « Ton compte n'est pas associé à une fiche commercial » : l'`email` de sa fiche doit être exactement l'adresse de son compte Google (logs `[IDENTITE]`)
+4. « La connexion a expiré ou a été interrompue » : recommencer la connexion (le `state` OAuth expire après 10 minutes)
 
 ### La note HubSpot n'apparaît pas
 1. Vérifier le scope `crm.objects.notes.write` sur la Private App HubSpot

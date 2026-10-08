@@ -1,7 +1,7 @@
 const HS_TOKEN = process.env.HUBSPOT_TOKEN!
 const HS_BASE = 'https://api.hubapi.com'
 
-async function hs(path: string, options: RequestInit = {}) {
+async function hs(path: string, options: RequestInit = {}, attempt = 0): Promise<any> {
   const res = await fetch(`${HS_BASE}${path}`, {
     ...options,
     headers: {
@@ -10,6 +10,11 @@ async function hs(path: string, options: RequestInit = {}) {
       ...(options.headers || {}),
     },
   })
+  // Limite de débit HubSpot (recherche : quelques requêtes par seconde) : jusqu'à 2 nouveaux essais
+  if (res.status === 429 && attempt < 2) {
+    await new Promise((r) => setTimeout(r, 400 * (attempt + 1)))
+    return hs(path, options, attempt + 1)
+  }
   if (!res.ok) {
     const err = await res.text()
     throw new Error(`HubSpot ${res.status}: ${err}`)
@@ -45,31 +50,25 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
 
   const allResults: Map<string, any> = new Map()
 
-  // Helper to run one search and merge results.
-  // Les erreurs (429, 401, 5xx) ne sont plus avalées : un résultat vide dû à une
+  // Les passes de recherche partent en parallèle, puis leurs résultats sont fusionnés dans
+  // l'ordre des passes (même classement qu'avant).
+  // Les erreurs (429, 401, 5xx) ne sont pas avalées : un résultat vide dû à une
   // panne pousserait le commercial à créer un doublon de contact dans HubSpot.
-  const runSearch = async (body: object) => {
-    const res = await hs('/crm/v3/objects/contacts/search', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
-    for (const r of res.results || []) {
-      if (!allResults.has(r.id)) allResults.set(r.id, r)
-    }
-  }
+  const passes: object[] = []
+  const runSearch = (body: object) => { passes.push(body) }
 
   const baseProps = ['firstname', 'lastname', 'email', 'jobtitle', 'rpps', 'hs_object_id']
 
   if (isEmail) {
     // Email search — exact filter
-    await runSearch({
+    runSearch({
       filterGroups: [{ filters: [{ propertyName: 'email', operator: 'CONTAINS_TOKEN', value: query.trim() }] }],
       properties: baseProps,
       limit: 25,
     })
   } else if (isNumeric) {
     // RPPS search
-    await runSearch({
+    runSearch({
       filterGroups: [{ filters: [{ propertyName: 'rpps', operator: 'EQ', value: query.trim() }] }],
       properties: baseProps,
       limit: 25,
@@ -82,7 +81,7 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
     if (normalized !== query.trim().toLowerCase()) searches.push(normalized)
 
     for (const q of searches) {
-      await runSearch({
+      runSearch({
         query: q,
         properties: baseProps,
         limit: 25,
@@ -93,7 +92,7 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
     if (parts.length === 2) {
       const [a, b] = parts
       // "dethie faye" → firstname=dethie AND lastname=faye
-      await runSearch({
+      runSearch({
         filterGroups: [
           {
             filters: [
@@ -121,11 +120,21 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
         { filters: [{ propertyName: 'firstname', operator: 'CONTAINS_TOKEN', value: part }] },
         { filters: [{ propertyName: 'lastname', operator: 'CONTAINS_TOKEN', value: part }] },
       ])
-      await runSearch({
+      runSearch({
         filterGroups,
         properties: baseProps,
         limit: 25,
       })
+    }
+  }
+
+  const responses = await Promise.all(passes.map((body) => hs('/crm/v3/objects/contacts/search', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })))
+  for (const res of responses) {
+    for (const r of res.results || []) {
+      if (!allResults.has(r.id)) allResults.set(r.id, r)
     }
   }
 
@@ -147,13 +156,24 @@ export interface LogEmailParams {
   toEmail: string
   fromEmail: string
   fromName: string
+  // Administrateur ayant envoyé le mail au nom du commercial (traçabilité)
+  sentByName?: string
+}
+
+// Corps de la Note « Email envoyé ». Mail envoyé par un administrateur au nom d'un commercial :
+// ligne « Envoyé par … pour le compte de … » sous le sujet.
+export function buildSentNoteBody(params: LogEmailParams): string {
+  const onBehalf = params.sentByName
+    ? `<br><b>Envoyé par :</b> ${params.sentByName} pour le compte de ${params.fromName}`
+    : ''
+  return `📧 <b>Email envoyé à ${params.toEmail}</b><br><br><b>Sujet :</b> ${params.subject}${onBehalf}<br><br>---<br><br>${params.body.replace(/\n/g, '<br>')}`
 }
 
 // Crée une Note sur la fiche du contact PS (scope requis : crm.objects.notes.write).
 // Ne lève jamais : renvoie success:false en cas d'échec, l'envoi du mail n'est pas bloqué.
 export async function logEmailActivity(params: LogEmailParams): Promise<{ success: boolean; id?: string }> {
   try {
-    const noteBody = `📧 <b>Email envoyé à ${params.toEmail}</b><br><br><b>Sujet :</b> ${params.subject}<br><br>---<br><br>${params.body.replace(/\n/g, '<br>')}`
+    const noteBody = buildSentNoteBody(params)
 
     const note = await hs('/crm/v3/objects/notes', {
       method: 'POST',

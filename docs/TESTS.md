@@ -14,6 +14,7 @@ Il ne dépend d'aucune donnée laissée en place : les données nécessaires son
 | Contact HubSpot de test | un seul contact dédié (ex. `18421683158`, adresse `dethie@medere.fr`) |
 | Adresse de réception | uniquement l'adresse du contact de test |
 | Slack | le `slack_user_id` du testeur (les DM de relance n'arrivent qu'à lui) |
+| Fiche commercial de test | « Dethie Faye » (`recubd9fXVX2rkhfB`, `dethie@medere.fr`, owner HubSpot `176772849`, Slack `U05UVHGBURX`, Statut Actif) — la session Google `dethie@medere.fr` est **administrateur** |
 | Node | ≥ 22.18 (exécute `scripts/seed-test.ts` sans dépendance) |
 | Navigateur | session Google @medere.fr ouverte sur `http://localhost:3000` |
 
@@ -32,7 +33,7 @@ export TEST_SLACK_USER_ID=<slack-id-du-testeur>
 
 1. **Base KV** : vérifier l'hôte avant tout (`grep KV_REST_API_URL .env.local`). Le script de seed refuse toute base dont l'hôte ≠ `TEST_KV_HOST`. En cas de doute : arrêter.
 2. **Destinataires** : le « PS » et le « commercial » de test sont tous deux le contact de test. Aucun mail vers une autre adresse, aucune Note sur un autre contact.
-3. **Commercial de test** : s'il n'existe pas dans Airtable, ne pas utiliser un vrai commercial (la copie et le DM partiraient chez lui). Injecter le commercial de test dans les requêtes `/api/generate` et `/api/send` depuis la console du navigateur (snippet §6), avec garde-fou sur le PS.
+3. **Commercial de test** : tous les envois se font avec la fiche « Dethie Faye ». Ne jamais envoyer au nom d'un vrai commercial (sa copie et ses DM partiraient chez lui). Pour tester l'administrateur au nom d'un autre commercial : **génération seule**, jamais d'envoi. Depuis le lot 2, l'identité est relue côté serveur : l'ancienne injection depuis la console n'a plus d'effet.
 4. **Sujets** : préfixer chaque sujet de test par `[TEST-…]` pour retrouver (et nettoyer) les mails sans lire les autres.
 5. **Variables faussées** : sauvegarder `.env.local` et son SHA-256 avant de commencer ; restaurer chaque variable faussée **immédiatement** après le test ; vérifier le SHA-256 à la fin.
    - Les routes rechargent `.env.local` à chaud, **pas le middleware** : pour un test qui touche `NEXTAUTH_SECRET`, redémarrer `npm run dev`.
@@ -190,6 +191,24 @@ Données : `seed --relance --names --purge` (envois au PS de test au nom de « C
 | J3 | `--export` puis `--apply` | restent : les 2 envois du PS fictif, `emails_index` à 2 membres, `relance:test-autre-ps` ; migration puis `--verify` à 0 écart |
 | J4 | Après migration : ouvertures / clics sur des envois du PS de test, `--verify` (0), purge `--apply`, `--verify` | contributions décomptées, 0 écart ; compteurs du PS fictif inchangés (y compris par commercial) ; `idx:contact:18421683158` supprimé, `idx:contact:99999999999` intact |
 
+### K. Identité et sécurité (lot 2)
+
+| # | Étapes | Attendu |
+|---|---|---|
+| K0 | Fonctions pures de `lib/roles.ts` (rôles, expéditeur) et `buildSentNoteBody` exécutées avec Node | tous les cas conformes (admin, commercial, lecteur, inactif, identifiant forgé, fiche inactive, Note avec / sans « Envoyé par ») |
+| K1 | `GET /api/me` (session `dethie@medere.fr`) | `role: admin`, fiche `recubd9fXVX2rkhfB` |
+| K2 | Étape 1 en administrateur | fiche Dethie Faye présélectionnée, liste des commerciaux actifs modifiable |
+| K3 | `POST /api/generate` avec `commercial_id` de Zacharie (**génération seule**) | 200, signature de Zacharie, log `[GENERATE] Génération par … au nom de …` |
+| K4 | `commercial_id` d'une fiche « Plus actif » | 400 « Ce commercial n'est pas actif… » |
+| K5 | Ancien objet `commercial: {…}` forgé, sans `commercial_id` | ignoré : signature Dethie Faye |
+| K6 | `ADMIN_EMAILS` vidé (annexe §6) : `/api/me`, étape 1, `generate` et `send` au nom de Zacharie | `role: commercial` ; étape 1 verrouillée « Ton compte » ; 403 « Tu ne peux générer et envoyer des mails qu'en ton nom. » — **remettre `ADMIN_EMAILS`** |
+| K7 | Envoi réel `[TEST-L2]` en commercial | `email_track` : nom, email, Slack `U05UVHGBURX`, owner `176772849` relus dans Airtable, pas de `sent_by` ; Note sans « Envoyé par » |
+| K8 | Fiche `recubd9fXVX2rkhfB` → « Plus actif » (connecteur Airtable : le jeton de l'app est en lecture seule), interroger `/api/me`, `/api/generate`, `/api/suivi`, `/api/send` toutes les 4 s | tout en 403 en moins de 60 s ; accueil et `/suivi` affichent « Ton accès à l'Agent Mail a été désactivé… » — **remettre « Actif »**, accès rétabli en moins de 60 s |
+| K9 | 31 `generate` puis 21 `send` invalides (aucun appel à Claude, aucun envoi) | 30 × 400 puis 429 « … limite de 30 générations… » ; 20 × 400 puis 429 « … limite de 20 envois… » — vider `ratelimit:*` |
+| K10 | `/api/auth/login` ×2 ; callback sans cookie, sans `state`, avec `state` différent, avec `state` identique et code faux | 307 vers Google avec `state` différent à chaque fois + cookie httpOnly `Path=/api/auth` ; `invalid_state` ×3 ; `server_error` (state accepté, code refusé) ; cookie effacé |
+| K11 | Connexion Google réelle (déconnexion puis « Se connecter avec Google ») | retour sur `/`, session créée |
+| K12 | Performance en mode production local (`npm run build` puis `npm run start`) | sessions, formations et recherche de contact < 500 ms (cache chaud) |
+
 ### G. Non-régression complète
 
 Connexion Google → génération → envoi → `opened` → `clicked` → `/suivi` (statut « Cliqué », dates) → déconnexion.
@@ -219,25 +238,6 @@ Puis, pour les envois réels faits pendant les tests :
 
 ---
 
-## 6. Annexe — injection du commercial de test (console du navigateur)
+## 6. Annexe — tester le rôle « commercial »
 
-À coller sur `http://localhost:3000` avant de dérouler l'assistant (perdu au rechargement de la page) :
-
-```js
-(() => {
-  const TC = { name: 'Dethie Faye', email: 'dethie@medere.fr', hubspot_id: '<owner-id-hubspot>', slack_user_id: '<slack-id>' }
-  const PS_ID = '18421683158', PS_EMAIL = 'dethie@medere.fr'
-  const orig = window.__origFetch || window.fetch
-  window.__origFetch = orig
-  window.fetch = async (url, init = {}) => {
-    const u = String(url)
-    if (u.startsWith('/api/send') || u.startsWith('/api/generate')) {
-      const b = JSON.parse(init.body)
-      if (b.ps?.email !== PS_EMAIL || (u.startsWith('/api/send') && b.ps?.id !== PS_ID)) throw new Error('GARDE-FOU : PS non autorisé')
-      b.commercial = u.startsWith('/api/send') ? { ...TC } : { name: TC.name, email: TC.email, phone: '' }
-      init = { ...init, body: JSON.stringify(b) }
-    }
-    return orig(url, init)
-  }
-})()
-```
+La session `dethie@medere.fr` est administrateur. Pour tester le rôle « commercial » (étape 1 verrouillée, refus d'agir au nom d'un autre), vider **temporairement** `ADMIN_EMAILS` dans `lib/config.ts` (`npm run dev` recharge à chaud), puis le remettre et vérifier `git diff lib/config.ts`. Pour un envoi au nom d'un autre commercial, utiliser un PS **sans adresse** : si le contrôle d'identité laissait passer, la requête s'arrêterait sur l'adresse manquante (400) sans rien envoyer.

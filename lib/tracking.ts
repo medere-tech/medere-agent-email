@@ -37,6 +37,8 @@ export interface RecordSendParams {
   formation: { nom: string; numero?: string }
   sujet: string
   corps: string
+  // Administrateur ayant envoyé au nom du commercial (traçabilité)
+  sentBy?: { email: string; name: string }
 }
 
 export interface RecordSendResult {
@@ -79,6 +81,7 @@ export async function recordSend(p: RecordSendParams): Promise<RecordSendResult>
     click_count: 0,
     relance_due_day: relanceDate,
     counted_sent: true,
+    ...(p.sentBy ? { sent_by: p.sentBy.email, sent_by_name: p.sentBy.name } : {}),
   }
 
   const created = await kv.eval(

@@ -1,12 +1,17 @@
 import { NextResponse } from 'next/server'
-import { getCommerciauxActifs } from '@/lib/airtable'
+import { requireActor } from '@/lib/identity'
+import { STATUT_ACTIF } from '@/lib/roles'
+
+// Commerciaux actifs (liste de l'étape 1 pour un administrateur, filtres du suivi).
+// Données relues côté serveur ; le cache des fiches est celui de lib/identity (strict, 60 s).
+export const dynamic = 'force-dynamic'
 
 export async function GET() {
-  try {
-    const commerciaux = await getCommerciauxActifs()
-    return NextResponse.json({ commerciaux })
-  } catch (e: any) {
-    console.error('[COMMERCIAUX] Chargement impossible:', e.message)
-    return NextResponse.json({ error: 'Impossible de charger la liste des commerciaux. Réessaie dans quelques instants.' }, { status: 500 })
-  }
+  const guard = await requireActor({ readOnly: true })
+  if (!guard.ok) return guard.response
+  const commerciaux = guard.actor.fiches
+    .filter((f) => f.statut === STATUT_ACTIF)
+    .map(({ id, name, email }) => ({ id, name, email }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'fr'))
+  return NextResponse.json({ commerciaux })
 }

@@ -3,6 +3,10 @@ import { cookies } from 'next/headers'
 
 const COOKIE_NAME = 'medere_session'
 
+// Cookie du paramètre `state` OAuth (posé par /api/auth/login, vérifié par le callback)
+export const OAUTH_STATE_COOKIE = 'medere_oauth_state'
+export const OAUTH_STATE_PATH = '/api/auth'
+
 // Lu à chaque appel : sans NEXTAUTH_SECRET, on lève une erreur explicite au lieu
 // de signer/vérifier les sessions avec une clé vide.
 function getSecret(): Uint8Array {

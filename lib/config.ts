@@ -38,3 +38,21 @@ export const RELANCE_DELAY_DAYS = 3
 
 // Fuseau de référence des compteurs journaliers et des relances.
 export const TIMEZONE = 'Europe/Paris'
+
+// Administrateurs : peuvent choisir n'importe quel commercial actif à l'étape 1, relancer
+// n'importe quel mail et tout voir. Toute action faite au nom d'un autre commercial est tracée
+// (sent_by dans le suivi, mention dans la Note HubSpot).
+export const ADMIN_EMAILS = ['dethie@medere.fr']
+
+// Fiches Commerciaux relues dans Airtable au plus toutes les N secondes : un commercial passé
+// « Plus actif » est bloqué partout en moins de N secondes, même avec une session valide.
+export const COMMERCIAL_CACHE_SECONDS = 60
+
+// Limites de débit par personne connectée (fenêtre fixe)
+export const RATE_LIMITS = {
+  generate: { max: 30, windowSeconds: 600 },
+  send: { max: 20, windowSeconds: 600 },
+} as const
+
+// Cache des tables Airtable lues en entier (formations, sessions) : en mémoire et dans le KV
+export const AIRTABLE_CACHE_SECONDS = 300

@@ -3,16 +3,15 @@ import { Resend } from 'resend'
 import { logEmailActivity } from '@/lib/hubspot'
 import { getKv, kvConfigured } from '@/lib/kv'
 import { recordSend } from '@/lib/tracking'
+import { requireActor, senderFor } from '@/lib/identity'
+import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
 
 interface SendPayload {
-  commercial: {
-    name: string
-    email: string
-    hubspot_id: string
-    slack_user_id: string
-  }
+  // Fiche Airtable du commercial choisi à l'étape 1 : seul un administrateur peut en désigner
+  // une autre que la sienne. Nom, email, HubSpot et Slack sont relus côté serveur.
+  commercial_id?: string
   ps: {
     id: string          // HubSpot contact ID
     titre: string
@@ -32,10 +31,25 @@ interface SendPayload {
 
 export async function POST(req: NextRequest) {
   try {
-    const payload: SendPayload = await req.json()
-    const { commercial, ps, formation, sujet, corps } = payload
+    // Identité relue côté serveur : aucun commercial venant du navigateur n'est cru
+    const guard = await requireActor()
+    if (!guard.ok) return guard.response
+    const { actor } = guard
 
-    if (!ps.email) {
+    const payload: SendPayload = await req.json()
+    const { ps, formation, sujet, corps } = payload
+
+    const resolved = senderFor(actor, payload.commercial_id)
+    if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: resolved.status })
+    const sender = resolved.sender
+    const commercial = { name: sender.name, email: sender.email, hubspot_id: sender.hubspot_id, slack_user_id: sender.slack_user_id }
+    // Administrateur agissant au nom d'un autre commercial : tracé dans le suivi et la Note HubSpot
+    const sentBy = resolved.onBehalf ? { email: actor.email, name: actor.name } : undefined
+
+    const limit = await checkRateLimit('send', actor.email)
+    if (!limit.ok) return NextResponse.json({ error: rateLimitMessage('send', limit.retryAfterSeconds) }, { status: 429 })
+
+    if (!ps?.email) {
       return NextResponse.json({ error: "Ce contact n'a pas d'adresse email dans HubSpot." }, { status: 400 })
     }
 
@@ -104,7 +118,7 @@ export async function POST(req: NextRequest) {
     let relanceDate = ''
     if (kvEnabled) {
       try {
-        const recorded = await recordSend({ resendId: resendId!, commercial, ps, formation, sujet, corps })
+        const recorded = await recordSend({ resendId: resendId!, commercial, ps, formation, sujet, corps, sentBy })
         if (!recorded.created) {
           const previous = await getKv().get<Record<string, any>>(`send_result:${resendId}`)
           if (previous) return NextResponse.json({ ...previous, replay: true })
@@ -147,6 +161,7 @@ export async function POST(req: NextRequest) {
       toEmail: ps.email,
       fromEmail: commercial.email,
       fromName: commercial.name,
+      sentByName: sentBy?.name,
     })
 
     // 3. La relance J+3 est planifiée par recordSend (relances_due, lue par le cron)

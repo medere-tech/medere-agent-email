@@ -1,3 +1,7 @@
+import { AIRTABLE_CACHE_SECONDS, COMMERCIAL_CACHE_SECONDS } from '@/lib/config'
+import { getKv, kvConfigured } from '@/lib/kv'
+import type { Fiche } from '@/lib/roles'
+
 const BASE_ID = process.env.AIRTABLE_BASE_ID!
 const TOKEN = process.env.AIRTABLE_TOKEN!
 
@@ -49,13 +53,69 @@ function formulaString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
-export interface Commercial {
-  id: string
-  hubspot_id: string
-  name: string
-  email: string
-  phone: string
-  slack_user_id: string
+// Tables lues en entier (formations, sessions) : relire toute la table Sessions prend ~3 s
+// (pagination de ~11 pages). Cache en mémoire (instance) puis dans le KV (partagé entre
+// instances), AIRTABLE_CACHE_SECONDS. Une modification Airtable apparaît donc dans l'app en
+// 5 minutes au plus. Le cron ne passe jamais par ce cache (inscriptions toujours à jour).
+const memoryCache = new Map<string, { at: number; value: unknown }>()
+const inflight = new Map<string, Promise<unknown>>()
+
+async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const ttlMs = AIRTABLE_CACHE_SECONDS * 1000
+  const hit = memoryCache.get(key)
+  if (hit && Date.now() - hit.at < ttlMs) return hit.value as T
+  // Plusieurs requêtes simultanées (préchargement + choix de la formation) : un seul chargement
+  const pending = inflight.get(key)
+  if (pending) return pending as Promise<T>
+  const promise = (async () => {
+    const kvKey = `cache:airtable:${key}`
+    if (kvConfigured()) {
+      try {
+        const fromKv = await getKv().get<{ at: number; value: T }>(kvKey)
+        if (fromKv && Date.now() - fromKv.at < ttlMs) {
+          memoryCache.set(key, fromKv)
+          return fromKv.value
+        }
+      } catch (e: any) {
+        console.error('[AIRTABLE] Cache KV illisible :', e.message)
+      }
+    }
+    const value = await load()
+    const entry = { at: Date.now(), value }
+    memoryCache.set(key, entry)
+    if (kvConfigured()) {
+      try {
+        await getKv().set(kvKey, entry, { ex: AIRTABLE_CACHE_SECONDS })
+      } catch (e: any) {
+        console.error('[AIRTABLE] Cache KV non enregistré :', e.message)
+      }
+    }
+    return value
+  })()
+  inflight.set(key, promise)
+  try {
+    return await promise
+  } finally {
+    inflight.delete(key)
+  }
+}
+
+// Toutes les sessions (champs utiles seulement), triées par date de début
+const SESSION_FIELDS = [
+  'session_id', 'Numéro de session', 'Date de début de session', 'Date de fin de session',
+  'Date 1ère soirée CV / Date Présentiel', 'Date 2ème soirée CV', "Date limite d'inscription",
+  'Temps lisible (Webflow)', "Numéro d'action DPC", 'webflow_id',
+]
+
+async function loadAllSessions(): Promise<{ id: string; fields: Record<string, any> }[]> {
+  const fields = SESSION_FIELDS.map((f) => `fields[]=${encodeURIComponent(f)}`).join('&')
+  const sort = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
+  const records = await atAll(`/${TABLES.sessions}?${fields}&${sort}`)
+  return records.map((r: any) => ({ id: r.id, fields: r.fields }))
+}
+
+function allSessionsCached() {
+  return cached('sessions:v1', loadAllSessions)
 }
 
 export interface Formation {
@@ -80,20 +140,35 @@ export interface Session {
   formation_id: string
 }
 
-export async function getCommerciauxActifs(): Promise<Commercial[]> {
-  const url = `/${TABLES.commerciaux}?filterByFormula=${encodeURIComponent('{Statut}="Actif"')}&fields[]=hubspot_id&fields[]=email&fields[]=phone&fields[]=slack_user_id&fields[]=hubspot_name`
-  const data = await at(url)
-  return data.records.map((r: any) => ({
+// Toutes les fiches Commerciaux (tous statuts), pour rapprocher la session Google d'une fiche.
+// Cache mémoire à durée STRICTE (COMMERCIAL_CACHE_SECONDS) : contrairement au cache Next
+// (revalidate), aucune fiche périmée n'est servie au-delà du délai — un commercial passé
+// « Plus actif » est bloqué en moins de COMMERCIAL_CACHE_SECONDS.
+let fichesCache: { at: number; fiches: Fiche[] } | null = null
+
+export async function getAllFiches(): Promise<Fiche[]> {
+  if (fichesCache && Date.now() - fichesCache.at < COMMERCIAL_CACHE_SECONDS * 1000) return fichesCache.fiches
+  const records = await atAll(
+    `/${TABLES.commerciaux}?fields[]=hubspot_id&fields[]=email&fields[]=phone&fields[]=slack_user_id&fields[]=hubspot_name&fields[]=Statut`
+  )
+  const fiches: Fiche[] = records.map((r: any) => ({
     id: r.id,
     hubspot_id: r.fields.hubspot_id || '',
     name: r.fields.hubspot_name || '',
     email: r.fields.email || '',
     phone: r.fields.phone || '',
     slack_user_id: r.fields.slack_user_id || '',
+    statut: r.fields.Statut || '',
   }))
+  fichesCache = { at: Date.now(), fiches }
+  return fiches
 }
 
 export async function getFormationsActives(): Promise<Formation[]> {
+  return cached('formations:v1', loadFormationsActives)
+}
+
+async function loadFormationsActives(): Promise<Formation[]> {
   // Formations actives avec numéro DPC (voir FORMATIONS_REQUIRE_FUTURE_SESSION en haut du fichier)
   const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
   const allFormationRecords = await atAll(
@@ -125,26 +200,9 @@ export async function getFormationsActives(): Promise<Formation[]> {
 }
 
 export async function getSessionsByFormation(formationRecordId: string, formationFormat: string = ''): Promise<Session[]> {
-  // Fetch all sessions with pagination, filter client-side
-  // Reason: ARRAYJOIN on linked record fields returns primary field values (not record IDs),
-  // so FIND("recXXX", ...) never matches in Airtable formulas.
-  const fields = [
-    encodeURIComponent('session_id'),
-    encodeURIComponent('Numéro de session'),
-    encodeURIComponent('Date de début de session'),
-    encodeURIComponent('Date de fin de session'),
-    encodeURIComponent("Date 1ère soirée CV / Date Présentiel"),
-    encodeURIComponent('Date 2ème soirée CV'),
-    encodeURIComponent("Date limite d'inscription"),
-    encodeURIComponent('Temps lisible (Webflow)'),
-    encodeURIComponent("Numéro d'action DPC"),
-    encodeURIComponent('webflow_id'),
-  ].map(f => `fields[]=${f}`).join('&')
-
-  const sort = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
-
-  // Paginate through all records
-  const allRecords = await atAll(`/${TABLES.sessions}?${fields}&${sort}`)
+  // Toute la table Sessions (en cache), filtrée ici : dans une formule Airtable, ARRAYJOIN d'un
+  // champ lié renvoie le champ principal (pas l'ID du record), FIND("recXXX", …) ne trouve rien.
+  const allRecords = await allSessionsCached()
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -243,9 +301,10 @@ async function fetchFormationsDejaFaites(
     return []
   }
 
-  const allSessions = await atAll(
-    `/${TABLES.sessions}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
-  )
+  // Correspondance session → formation : le cron (fresh) relit Airtable, la génération utilise le cache
+  const allSessions = opts.fresh
+    ? await atAll(`/${TABLES.sessions}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`)
+    : await allSessionsCached()
 
   const matchingSessions = allSessions.filter((r: any) => {
     const sid = r.fields['session_id']
@@ -397,4 +456,9 @@ export async function getFormationsUpsell(
     })
 
   return candidates
+}
+// Préchauffe le cache des sessions (appelé à l'arrivée sur l'assistant) : le choix d'une
+// formation à l'étape 3 n'attend plus le chargement complet de la table.
+export async function warmSessionsCache(): Promise<number> {
+  return (await allSessionsCached()).length
 }

@@ -1,13 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { generateMail } from '@/lib/claude'
 import { getFormationsUpsell, getFormationsDejaFaites } from '@/lib/airtable'
+import { requireActor, senderFor } from '@/lib/identity'
+import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json()
-    const { commercial, formation, sessions, ps } = body
+    // Identité relue côté serveur : aucun commercial venant du navigateur n'est cru
+    const guard = await requireActor()
+    if (!guard.ok) return guard.response
+    const { actor } = guard
 
-    if (!commercial || !formation || !sessions?.length || !ps) {
+    const body = await req.json()
+    const { commercial_id, formation, sessions, ps } = body
+
+    const resolved = senderFor(actor, commercial_id)
+    if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: resolved.status })
+    const sender = resolved.sender
+
+    const limit = await checkRateLimit('generate', actor.email)
+    if (!limit.ok) return NextResponse.json({ error: rateLimitMessage('generate', limit.retryAfterSeconds) }, { status: 429 })
+
+    if (!formation || !sessions?.length || !ps) {
       return NextResponse.json({ error: 'Il manque des informations : vérifie la formation, les sessions et le contact.' }, { status: 400 })
     }
 
@@ -39,8 +53,9 @@ export async function POST(req: NextRequest) {
       // Non-blocking
     }
 
+    if (resolved.onBehalf) console.log('[GENERATE] Génération par', actor.email, 'au nom de', sender.email)
     const result = await generateMail({
-      commercial,
+      commercial: { name: sender.name, email: sender.email, phone: sender.phone },
       formation,
       sessions,
       ps,

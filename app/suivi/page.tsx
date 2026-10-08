@@ -180,6 +180,8 @@ function abrevTitre(nom: string) {
     .replace(/^Monsieur\s/i, 'M. ')
 }
 
+const SUIVI_KO = "Impossible d'afficher le suivi. Réessaie dans quelques instants."
+
 // ─── Page principale ──────────────────────────────────────────────────────────
 export default function SuiviPage() {
   const [data, setData] = useState<ApiResponse | null>(null)
@@ -194,10 +196,15 @@ export default function SuiviPage() {
     setError('')
     try {
       const res = await fetch(`/api/suivi?page=${p}`, { cache: 'no-store' })
-      if (!res.ok) throw new Error("Impossible d'afficher le suivi. Réessaie dans quelques instants.")
+      if (!res.ok) {
+        // Accès refusé (compte désactivé) ou session expirée : message du serveur, déjà lisible
+        const body = await res.json().catch(() => null)
+        throw Object.assign(new Error((res.status === 401 || res.status === 403) && body?.error ? body.error : SUIVI_KO), { userFacing: true })
+      }
       setData(await res.json())
     } catch (e: any) {
-      setError("Impossible d'afficher le suivi. Réessaie dans quelques instants.")
+      // Seuls les messages préparés pour l’utilisateur sont affichés (pas « Failed to fetch »)
+      setError(e?.userFacing ? e.message : SUIVI_KO)
     } finally {
       setLoading(false)
       setRefreshing(false)

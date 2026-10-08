@@ -3,7 +3,10 @@
 import { useState, useEffect, useRef } from 'react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface Commercial { id: string; hubspot_id: string; name: string; email: string; phone: string; slack_user_id: string }
+// Fiche commercial (id Airtable) : le serveur relit nom, email, HubSpot et Slack à partir de l'id
+interface Commercial { id: string; name: string; email: string }
+// Personne connectée (rôle déterminé côté serveur)
+interface Me { email: string; name: string; role: 'admin' | 'commercial' | 'lecteur'; commercial: Commercial | null }
 interface Formation { id: string; nom: string; numero: string; format: string; public: string[] }
 interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string }
 interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
@@ -264,24 +267,44 @@ export default function AgentMail() {
   const [contactSearchFailed, setContactSearchFailed] = useState(false)
   const [sendResult, setSendResult] = useState<any>(null)
   const [error, setError] = useState('')
+  // Personne connectée ; blocked = accès refusé (compte désactivé, session expirée…)
+  const [me, setMe] = useState<Me | null>(null)
+  const [blocked, setBlocked] = useState('')
 
-  // Load commerciaux on mount
+  // Au chargement : rôle de la personne connectée, puis préchargements (formations, liste des
+  // commerciaux pour un administrateur, cache des sessions côté serveur) pour que chaque étape
+  // s'affiche sans attente.
   useEffect(() => {
-    fetchJson('/api/commerciaux')
-      .then((d) => setCommerciauxList(d.commerciaux || []))
-      .catch((e) => setError(loadError(e, 'la liste des commerciaux')))
+    fetchJson('/api/me')
+      .then((m: Me) => {
+        setMe(m)
+        if (m.role === 'lecteur') return
+        if (m.commercial) setCommercial(m.commercial)
+        fetchJson('/api/sessions?warm=1').catch(() => {})
+        if (m.role === 'admin') {
+          fetchJson('/api/commerciaux')
+            .then((d) => setCommerciauxList(d.commerciaux || []))
+            .catch((e) => setError(loadError(e, 'la liste des commerciaux')))
+        }
+        setLoadingFormations(true)
+        fetchJson('/api/formations')
+          .then((d) => setFormationsList(d.formations || []))
+          .catch((e) => setError(loadError(e, 'la liste des formations')))
+          .finally(() => setLoadingFormations(false))
+      })
+      .catch((e) => setBlocked(e.message))
   }, [])
 
-  // Load formations when step 2
+  // Formations pas encore chargées (préchargement en échec) : nouvel essai à l'étape 2
   useEffect(() => {
-    if (step === 2 && formations.length === 0) {
+    if (step === 2 && formations.length === 0 && !loadingFormations) {
       setLoadingFormations(true)
       fetchJson('/api/formations')
         .then((d) => setFormationsList(d.formations || []))
         .catch((e) => setError(loadError(e, 'la liste des formations')))
         .finally(() => setLoadingFormations(false))
     }
-  }, [step, formations.length])
+  }, [step, formations.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load sessions when formation selected
   useEffect(() => {
@@ -327,7 +350,7 @@ export default function AgentMail() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          commercial: { name: commercial.name, email: commercial.email, phone: commercial.phone || '' },
+          commercial_id: commercial.id,
           formation: { id: formation.id, nom: formation.nom, numero: formation.numero, format: formation.format, public: formation.public },
           sessions: selectedSessions.map((s) => ({
             numero: s.numero,
@@ -369,12 +392,7 @@ export default function AgentMail() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          commercial: {
-            name: commercial.name,
-            email: commercial.email,
-            hubspot_id: commercial.hubspot_id,
-            slack_user_id: commercial.slack_user_id,
-          },
+          commercial_id: commercial.id,
           ps: {
             id: psContact.id,
             titre: psTitre,
@@ -401,7 +419,7 @@ export default function AgentMail() {
 
   const reset = () => {
     setStep(1)
-    setCommercial(null)
+    setCommercial(me?.commercial ?? null)
     setFormation(null)
     setSelectedSessions([])
     setPsContact(null)
@@ -461,6 +479,26 @@ export default function AgentMail() {
 
         {/* Card */}
         <div className="bg-white border border-zinc-200 rounded-xl shadow-sm p-6">
+          {blocked ? (
+            <div className="flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-zinc-700">
+              <Icons.Warning />
+              <span>{blocked}</span>
+            </div>
+          ) : !me ? (
+            <div className="flex items-center gap-2 py-6 justify-center text-sm text-zinc-400">
+              <Icons.Loader /> Chargement...
+            </div>
+          ) : me.role === 'lecteur' ? (
+            <div className="space-y-3">
+              <div className="flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-zinc-700">
+                <Icons.User />
+                <span>Ton compte n'est pas associé à une fiche commercial : tu peux consulter le suivi, mais pas générer ni envoyer de mail.</span>
+              </div>
+              <a href="/suivi" className="block w-full py-2.5 text-center bg-zinc-900 text-white text-sm font-medium rounded-lg hover:bg-zinc-800 transition-colors">
+                Voir le suivi des envois
+              </a>
+            </div>
+          ) : (<>
           {step < 6 && <StepIndicator current={step} />}
 
           {/* Error */}
@@ -476,14 +514,25 @@ export default function AgentMail() {
             <div className="space-y-4">
               <div>
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Qui envoie ce mail ?</h2>
-                <p className="text-sm text-zinc-500">Sélectionne ton nom pour personnaliser la signature.</p>
+                <p className="text-sm text-zinc-500">
+                  {me.role === 'admin'
+                    ? "Tu peux envoyer au nom de n'importe quel commercial actif : ce sera indiqué dans la Note HubSpot."
+                    : 'Le mail part à ton nom, avec ta signature.'}
+                </p>
               </div>
-              <Select
-                options={commerciaux.map((c) => ({ label: c.name, ...c }))}
-                value={commercial ? { label: commercial.name, ...commercial } : null}
-                onChange={(v) => setCommercial(v as any)}
-                placeholder="Sélectionner un commercial..."
-              />
+              {me.role === 'admin' ? (
+                <Select
+                  options={commerciaux.map((c) => ({ label: c.name, ...c }))}
+                  value={commercial ? { label: commercial.name, ...commercial } : null}
+                  onChange={(v) => setCommercial({ id: v.id, name: v.name, email: v.email })}
+                  placeholder="Sélectionner un commercial..."
+                />
+              ) : (
+                <div className="w-full flex items-center justify-between px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg text-sm">
+                  <span className="text-zinc-900">{commercial?.name}</span>
+                  <span className="flex items-center gap-1 text-xs text-zinc-400"><Icons.User /> Ton compte</span>
+                </div>
+              )}
               <button
                 onClick={() => setStep(2)}
                 disabled={!canProceed[1]}
@@ -826,6 +875,7 @@ export default function AgentMail() {
               </button>
             </div>
           )}
+          </>)}
         </div>
 
         {/* Footer */}

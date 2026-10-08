@@ -14,17 +14,11 @@ export default async function LoginPage({
     access_denied: 'Accès refusé.',
     unauthorized_domain: 'Seuls les comptes @medere.fr sont autorisés.',
     server_error: 'Une erreur est survenue. Réessaie.',
+    invalid_state: 'La connexion a expiré ou a été interrompue. Recommence.',
   }
 
   const errorMsg = searchParams.error ? errorMessages[searchParams.error] : null
 
-  const googleAuthUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-  googleAuthUrl.searchParams.set('client_id', process.env.GOOGLE_CLIENT_ID!)
-  googleAuthUrl.searchParams.set('redirect_uri', `${process.env.NEXTAUTH_URL}/api/auth/callback/google`)
-  googleAuthUrl.searchParams.set('response_type', 'code')
-  googleAuthUrl.searchParams.set('scope', 'openid email profile')
-  googleAuthUrl.searchParams.set('hd', 'medere.fr')
-  googleAuthUrl.searchParams.set('prompt', 'select_account')
 
   return (
     <div className="min-h-screen bg-zinc-50 flex items-center justify-center px-4">
@@ -53,7 +47,7 @@ export default async function LoginPage({
           )}
 
           
-            <a href={googleAuthUrl.toString()}
+            <a href="/api/auth/login"
             className="w-full flex items-center justify-center gap-3 px-4 py-2.5 border border-zinc-200 rounded-lg text-sm font-medium text-zinc-700 hover:bg-zinc-50 transition-colors"
           >
             <svg width="18" height="18" viewBox="0 0 24 24">
