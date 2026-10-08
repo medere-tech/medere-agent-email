@@ -10,6 +10,6 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ contacts })
   } catch (e: any) {
     console.error('[CONTACT-SEARCH] HubSpot indisponible:', e.message)
-    return NextResponse.json({ error: 'HubSpot indisponible', detail: e.message }, { status: 502 })
+    return NextResponse.json({ error: 'HubSpot indisponible, ne crée pas le contact. Réessaie dans quelques instants.' }, { status: 502 })
   }
 }

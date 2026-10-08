@@ -118,8 +118,8 @@ Créer une clé `relance:*` datée du jour (`--relance` du seed, ou à la main) 
 |---|---|---|
 | E1 | `HUBSPOT_TOKEN` faussé, recherche de contact | bandeau rouge « HubSpot indisponible, ne crée pas le contact », pas de message orange — **restaurer** |
 | E2 | Nom inexistant, HubSpot OK | message orange « Aucun contact trouvé » |
-| E3 | Passer l'étape 1, fausser `AIRTABLE_TOKEN`, cliquer « Continuer » | bandeau « Impossible de charger les formations » |
-| E4 | Formations chargées, fausser `AIRTABLE_TOKEN`, choisir une formation | bandeau « Impossible de charger les sessions » — **restaurer** |
+| E3 | Passer l'étape 1, fausser `AIRTABLE_TOKEN`, cliquer « Continuer » | bandeau « Impossible de charger la liste des formations. Réessaie dans quelques instants. » (aucun code technique affiché ; détail dans le log `[FORMATIONS]`) |
+| E4 | Formations chargées, fausser `AIRTABLE_TOKEN`, choisir une formation | bandeau « Impossible de charger les sessions. Réessaie dans quelques instants. » — **restaurer** |
 | E5 | Requête `/api/generate` sans cookie (`credentials: 'omit'`) | « Session expirée, reconnecte-toi. » |
 
 ### F. Pagination, session, déconnexion, secrets, formations
@@ -129,7 +129,7 @@ Créer une clé `relance:*` datée du jour (`--relance` du seed, ou à la main) 
 | F1 | Charger `/api/formations` et `/api/sessions` 4 fois à < 60 s d'intervalle | toujours 200, mêmes nombres, aucun 422 `LIST_RECORDS_ITERATOR_NOT_AVAILABLE` |
 | F2 | Se reconnecter, inspecter le cookie `medere_session` (DevTools → Application) | expiration ≈ connexion + 7 jours (même durée pour le JWT). Rappel : la session n'est pas révocable — un compte Google désactivé garde l'accès jusqu'à 7 jours ; seule la rotation de `NEXTAUTH_SECRET` coupe toutes les sessions |
 | F3 | « Se déconnecter » sur `/` puis sur `/suivi` | `POST /api/auth/logout` → 303 → `/login` ; `/` redirige vers `/login` ; `GET /api/auth/logout` → 405 ; ancienne route `/api/auth/callback/google/logout` → 404 |
-| F4 | Retirer `NEXTAUTH_SECRET`, **redémarrer** `npm run dev` | `/` et `/api/*` → 500 + log `[AUTH] NEXTAUTH_SECRET manquant` ; `/login` reste en 200 ; callback → 500 — **restaurer et redémarrer** |
+| F4 | Retirer `NEXTAUTH_SECRET`, **redémarrer** `npm run dev` | `/` et `/api/*` → 500 « Service momentanément indisponible. Préviens Déthié. » + log `[AUTH] NEXTAUTH_SECRET manquant` ; `/login` reste en 200 ; callback → 500 — **restaurer et redémarrer** |
 | F5 | `/api/formations` avec `FORMATIONS_REQUIRE_FUTURE_SESSION = false` | même nombre qu'un comptage Airtable `Active` + numéro DPC |
 | F6 | (optionnel) passer la constante à `true` | uniquement les formations avec session future ; **remettre `false`** |
 
@@ -142,9 +142,15 @@ Compteurs : `HGETALL stats:day:<jour d'envoi>` ; entrée : `GET email_track:<id>
 |---|---|---|
 | H1 | Envoi réel `[TEST-H]` | `email_track` avec `v: 2`, `sent_day`, `commercial_key` ; `email_body` (TTL ≈ 90 j) ; membre dans `emails_index`, `idx:commercial:<email>`, `idx:contact:<id>`, `relances_due` (score = J+3 00:00 UTC) ; `stats:day` : `sent` +1 et `sent\|<email>` +1 ; plus aucune clé `relance:*` créée |
 | H2 | `delivered --message-id=<x>` sur H1 | statut `délivré`, `delivered_at`, `message_id` ; `delivered` +1 |
-| H3 | `opened --created-at=<livraison + 10 s>` | `auto_open_count: 1`, `first_auto_opened_at` ; statut, `open_count` et compteurs inchangés ; aucune Note |
-| H4 | `opened` (maintenant, > 60 s) puis 2 × `opened` | statut `ouvert`, `first_opened_at` figé, `last_opened_at` mis à jour, `open_count: 3` ; `opened` +1 une seule fois ; 1 seule Note « ouvert » |
-| H5 | `clicked --created-at=<livraison + 5 s>` puis `clicked` | 1er clic automatique (aucune Note, aucun compteur) ; 2e : statut `cliqué`, `clicked` +1, 1 Note « cliqué » |
+| H3 | `delivered` puis `opened --created-at=<livraison + 1 s>` | ouverture **humaine** : statut `ouvert`, `opened` +1, 1 Note « Email ouvert » |
+| H4 | 2 × `opened` de plus | `first_opened_at` figé, `last_opened_at` mis à jour, `open_count: 3` ; `opened` +1 une seule fois ; 1 seule Note |
+| H5 | Un `clicked` isolé | humain : statut `cliqué`, `clicked` +1 ; Note « 🖱️ Lien cliqué le… » créée ~3 s après |
+| H5b | Rafale (`seed --clicks`) : 3 `clicked` **en parallèle** sur 3 liens différents, `--click-at` à 0 / 0,4 / 0,8 s | les 3 clics `AUTO(rafale)` dans `email_clicks`, `click_count: 0`, `auto_click_count: 3`, statut `délivré`, `clicked` et `opened` inchangés, log « Premier clic reclassé automatique, Note non créée » |
+| H5c | Même rafale, ordre d'arrivée inversé | même résultat |
+| H5d | Même lien cliqué 2 fois en 0,5 s | 2 clics humains, `click_count: 2`, 1 Note |
+| H5e | `--ua='…HeadlessChrome…'` puis `--ua=` (vide) | `AUTO(robot)`, compteurs inchangés |
+| H5f | Clic humain bien après une rafale | compté, 1 Note |
+| H5g | Limite : clic humain (Note créée), puis 2e lien à +1 s arrivé 2 s plus tard | les 2 reclassés, compteurs et statut corrigés ; la Note reste (limite documentée) |
 | H6 | `bounced` sur un autre envoi déjà ouvert | statut `bounce` (prioritaire), `bounced` +1 ; puis `opened` → statut reste `bounce` |
 | H7 | `complained` | statut `plainte`, `complained` +1 |
 | H8 | Webhooks sur `test-legacy` **avant** migration | entrée mise à jour, verrou `legacy`, aucune Note « ouvert », **aucun** compteur modifié |
@@ -153,10 +159,24 @@ Compteurs : `HGETALL stats:day:<jour d'envoi>` ; entrée : `GET email_track:<id>
 | H11 | `--host` faux ; migration sans export de moins d'une heure (`--backup-dir` vide) | les deux refusées (exit 1) |
 | H12 | `--export` puis migration réelle | entrées en `v: 2`, compteurs et index créés, `relance:test-seed-today` rattachée et supprimée, `legacy:relance:test-seed-orphan` dans `relances_due`, `meta:schema_version = 2` |
 | H13 | Relancer la migration ; comparer deux exports avant / après | « 0 envoi(s) migré(s) », aucune différence de valeur (hash comparés sans ordre) |
+| H13b | `migrate-kv.ts --verify` après tous les tests de webhooks | « Écarts de compteurs : 0 », « Incohérences fait / comptage : 0 » |
+| H13c | Migration lancée **pendant** une salve de webhooks parallèles (`opened` + `clicked` sur 5 envois), puis `--verify`, 2e migration, `--verify` | 0 écart, 0 incohérence |
 | H14 | `--restore=<export H12>` sans puis avec `--confirm` | plan sans écriture ; puis base identique à l'export (clés, valeurs, TTL) |
 | H15 | Webhooks sur `test-legacy` **après** migration | aucune nouvelle Note « ouvert », compteurs non doublés |
 | H16 | `/suivi` après migration | stats = somme des `stats:day:*` ; mêmes chiffres qu'avant migration |
 | H17 | Purge : entrée de test datée de 1 100 jours (score de `emails_index` + entrées d'index), puis appel du cron | `purged: 1`, `email_track`, `email_body`, verrous et membres d'index supprimés ; les autres envois intacts |
+
+### I. Notes HubSpot en double (`scripts/dedupe-hubspot-notes.ts`) — contact de test uniquement
+
+Créer sur le contact de test des Notes `[TEST-DEDUP]` au format de l'agent + les entrées KV correspondantes : mail A (3 « Email ouvert », 2 « Email cliqué » + 1 « Lien cliqué », 2 « Email envoyé »), deux mails au même sujet B (2 « Email ouvert »), mail C (1 Note), 2 Notes manuelles « pièges » reprenant les mêmes mots.
+Toujours avec `--contact=<contact de test> --subject-prefix="[TEST-DEDUP]"`.
+
+| # | Étapes | Attendu |
+|---|---|---|
+| I1 | Rapport (sans `--apply`) | A : garde la plus ancienne ouverture et le plus ancien clic, 4 à archiver ; B signalé AMBIGU ; C, pièges, « Email envoyé » absents du rapport ; aucune modification |
+| I2 | `--host` faux | refus, exit 1 |
+| I3 | `--apply` | 4 Notes archivées (404 en lecture), toutes les autres présentes ; mails du KV intacts |
+| I4 | 2e passage | « 0 doublon(s) », B toujours ambigu |
 
 ### G. Non-régression complète
 

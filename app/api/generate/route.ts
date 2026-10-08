@@ -8,7 +8,7 @@ export async function POST(req: NextRequest) {
     const { commercial, formation, sessions, ps } = body
 
     if (!commercial || !formation || !sessions?.length || !ps) {
-      return NextResponse.json({ error: 'Données manquantes' }, { status: 400 })
+      return NextResponse.json({ error: 'Il manque des informations : vérifie la formation, les sessions et le contact.' }, { status: 400 })
     }
 
     // Upsell intelligent : formations actives, même public, session disponible juste après en tenant compte de la spécialité du PS, de la date de fin max des sessions sélectionnées, et que le PS n'a pas déjà faites
@@ -50,6 +50,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ sujet: result.sujet, corps: result.corps })
   } catch (e: any) {
     console.error('Generate error:', e)
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    return NextResponse.json({ error: 'La rédaction du mail a échoué. Réessaie.' }, { status: 500 })
   }
 }

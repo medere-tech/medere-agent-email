@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
 import { getKv } from '@/lib/kv'
-import { applyEvent, type TrackingEvent } from '@/lib/tracking'
+import { applyEvent, firstHumanClick, type TrackingEvent } from '@/lib/tracking'
+import { FIRST_CLICK_CONFIRM_DELAY_MS } from '@/lib/config'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
 
@@ -70,35 +71,56 @@ async function handleEvent(event: ReturnType<typeof resend.webhooks.verify>, svi
   }
 
   // Date de l'événement chez Resend (et non de réception) : un rejeu tardif ne fausse
-  // ni la détection des événements automatiques ni les dates affichées.
+  // pas les dates affichées. Pour un clic, Resend fournit en plus l'heure réelle du clic.
   const createdAt = new Date((event as any).created_at || '')
   const eventAt = Number.isFinite(createdAt.getTime()) ? createdAt : new Date()
+  const click = data?.click && typeof data.click === 'object'
+    ? { link: data.click.link, timestamp: data.click.timestamp, userAgent: data.click.userAgent }
+    : {}
 
-  const result = await applyEvent(emailId, kind, eventAt, typeof data?.message_id === 'string' ? data.message_id : '')
+  const result = await applyEvent(emailId, kind, eventAt, typeof data?.message_id === 'string' ? data.message_id : '', click)
 
   if (!result.tracked) {
     // Inclut les copies envoyées au commercial (jamais enregistrées dans le KV)
     console.log('[WEBHOOK] email_id non trouvé dans KV:', emailId)
     return
   }
-  console.log('[WEBHOOK] Statut KV mis à jour:', emailId, kind, result.automatic ? '(automatique)' : '', '→', result.statut)
+  const auto = result.autoReason ? `(automatique : ${result.autoReason})` : ''
+  const reclassified = result.reclassified ? `(${result.reclassified} clic(s) précédent(s) reclassé(s) automatique(s))` : ''
+  console.log('[WEBHOOK] Statut KV mis à jour:', emailId, kind, auto, reclassified, '→', result.statut)
 
-  // Une seule Note HubSpot par type (première ouverture, premier clic), jamais pour
-  // un événement automatique ; le verrou est posé atomiquement par le script.
-  const noteKind = result.createOpenNote ? 'opened' : result.createClickNote ? 'clicked' : null
-  if (!noteKind || !result.entry) return
-
+  // Une seule Note HubSpot par type (première ouverture, premier clic humain), jamais pour
+  // un clic automatique ; le verrou est posé atomiquement par le script.
   const entry = result.entry
+  if (!entry) return
+  let noteKind: 'opened' | 'clicked' | null = result.createOpenNote ? 'opened' : result.createClickNote ? 'clicked' : null
+  if (!noteKind) return
+
+  let noteDate = eventAt
+  if (noteKind === 'clicked') {
+    // Laisse arriver les autres clics d'une éventuelle rafale, puis relit le premier clic humain
+    await new Promise((r) => setTimeout(r, FIRST_CLICK_CONFIRM_DELAY_MS))
+    const firstClick = await firstHumanClick(emailId)
+    if (!firstClick) {
+      await kv.del(`hubspot_note:${emailId}:clicked`)
+      console.log('[WEBHOOK] Premier clic reclassé automatique, Note non créée:', emailId)
+      noteKind = null
+    } else {
+      noteDate = new Date(firstClick)
+    }
+  }
+  if (!noteKind) return
+
   const emoji = noteKind === 'opened' ? '👁️' : '🖱️'
-  const action = noteKind === 'opened' ? 'ouvert' : 'cliqué'
+  const action = noteKind === 'opened' ? 'Email ouvert' : 'Lien cliqué'
   const date = new Intl.DateTimeFormat('fr-FR', {
     day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris',
-  }).format(eventAt)
+  }).format(noteDate)
 
   try {
     await logNoteHubSpot(
       entry.contact_id,
-      `${emoji} <b>Email ${action} le ${date}</b><br><br><b>Sujet :</b> ${entry.sujet}<br><b>Commercial :</b> ${entry.commercial_name}`
+      `${emoji} <b>${action} le ${date}</b><br><br><b>Sujet :</b> ${entry.sujet}<br><b>Commercial :</b> ${entry.commercial_name}`
     )
     console.log('[WEBHOOK] Note HubSpot créée pour contact:', entry.contact_id)
   } catch (e) {

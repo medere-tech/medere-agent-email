@@ -1,6 +1,9 @@
 import { getKv } from '@/lib/kv'
 import {
-  AUTO_EVENT_WINDOW_SECONDS,
+  BOT_USER_AGENTS,
+  CLICK_BURST_SECONDS,
+  CLICK_HISTORY_MAX,
+  CLICK_HISTORY_TTL_DAYS,
   EMAIL_BODY_TTL_DAYS,
   RELANCE_DELAY_DAYS,
   RETENTION_DAYS,
@@ -107,51 +110,90 @@ export async function recordSend(p: RecordSendParams): Promise<RecordSendResult>
 }
 
 // ─── Webhook ──────────────────────────────────────────────────────────────────
+export interface ClickInfo {
+  link?: string
+  timestamp?: string
+  userAgent?: string
+}
+
 export interface ApplyEventResult {
   tracked: boolean
-  automatic: boolean
+  // Raison du classement automatique d'un clic ('' = humain)
+  autoReason: '' | 'robot' | 'rafale'
+  // Clics précédents de la même rafale reclassés automatiques par cet événement
+  reclassified: number
   createOpenNote: boolean
   createClickNote: boolean
   statut: string
   entry: Record<string, any> | null
 }
 
-// Applique un événement Resend à l'envoi. eventAt = date de l'événement (created_at du webhook).
+// Navigateur d'un robot : vide, ou contenant une signature connue (BOT_USER_AGENTS).
+// undefined = information absente du webhook → pas un signe de robot.
+export function isBotUserAgent(userAgent: string | undefined): boolean {
+  if (userAgent === undefined || userAgent === null) return false
+  const ua = String(userAgent).trim().toLowerCase()
+  if (!ua) return true
+  return BOT_USER_AGENTS.some((signature) => ua.includes(signature))
+}
+
+// Applique un événement Resend à l'envoi. eventAt = date de l'événement (created_at du webhook) ;
+// pour un clic, l'heure réelle du clic (click.timestamp) sert à détecter les rafales.
+// Le navigateur sert au classement puis est oublié : seuls le résultat et la raison sont stockés.
 export async function applyEvent(
   emailId: string,
   kind: TrackingEvent,
   eventAt: Date,
-  messageId = ''
+  messageId = '',
+  click: ClickInfo = {}
 ): Promise<ApplyEventResult> {
   const kv = getKv()
   const trackKey = KEYS.track(emailId)
   // sent_at ne change jamais : lu hors du script pour calculer le jour des compteurs
   const entry = await kv.get<Record<string, any>>(trackKey)
   if (!entry) {
-    return { tracked: false, automatic: false, createOpenNote: false, createClickNote: false, statut: '', entry: null }
+    return { tracked: false, autoReason: '', reclassified: 0, createOpenNote: false, createClickNote: false, statut: '', entry: null }
   }
 
   const sentDay: string = entry.sent_day || parisDay(entry.sent_at || eventAt)
-  const reference = Date.parse(entry.delivered_at || entry.sent_at || '')
-  const automatic =
-    (kind === 'opened' || kind === 'clicked') &&
-    Number.isFinite(reference) &&
-    eventAt.getTime() - reference < AUTO_EVENT_WINDOW_SECONDS * 1000
+  const clickAt = Date.parse(click.timestamp || '')
+  const clickMs = Number.isFinite(clickAt) ? clickAt : eventAt.getTime()
+  const clickIso = new Date(clickMs).toISOString()
+  const robot = kind === 'clicked' && isBotUserAgent(click.userAgent)
 
   const res = (await kv.eval(
     EVENT_SCRIPT,
-    [KEYS.track(emailId), KEYS.statsDay(sentDay), KEYS.noteLock(emailId, 'opened'), KEYS.noteLock(emailId, 'clicked')],
-    [kind, eventAt.toISOString(), automatic ? '1' : '0', String(statsExpireAt(sentDay, RETENTION_DAYS)), messageId]
-  )) as [number, number, number, string]
+    [trackKey, KEYS.statsDay(sentDay), KEYS.noteLock(emailId, 'opened'), KEYS.noteLock(emailId, 'clicked'), KEYS.clicks(emailId)],
+    [
+      kind,
+      kind === 'clicked' ? clickIso : eventAt.toISOString(),
+      robot ? '1' : '0',
+      String(statsExpireAt(sentDay, RETENTION_DAYS)),
+      messageId,
+      String(clickMs),
+      click.link || '',
+      String(CLICK_BURST_SECONDS * 1000),
+      String(CLICK_HISTORY_MAX),
+      String(CLICK_HISTORY_TTL_DAYS * 86400),
+    ]
+  )) as [number, number, number, string, string, number]
 
   return {
     tracked: Number(res[0]) === 1,
-    automatic,
+    autoReason: (res[4] || '') as ApplyEventResult['autoReason'],
+    reclassified: Number(res[5] || 0),
     createOpenNote: Number(res[1]) === 1,
     createClickNote: Number(res[2]) === 1,
     statut: res[3] || '',
     entry,
   }
+}
+
+// Premier clic humain actuel (date ISO) ou null : relu après le délai de confirmation,
+// car une rafale arrivée entre-temps a pu reclasser le premier clic en automatique.
+export async function firstHumanClick(emailId: string): Promise<string | null> {
+  const entry = await getKv().get<Record<string, any>>(KEYS.track(emailId))
+  return entry?.first_clicked_at || null
 }
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
@@ -196,7 +238,7 @@ export function statsFromEntries(entries: Record<string, any>[]): Stats {
     const clicked = !!(e.first_clicked_at || e.clicked_at || e.statut === 'cliqué')
     const complained = !!(e.complained_at || e.statut === 'plainte')
     stats.sent++
-    if (e.delivered_at || opened || complained || e.statut === 'délivré' || e.first_auto_opened_at || e.first_auto_clicked_at) stats.delivered++
+    if (e.delivered_at || opened || complained || e.statut === 'délivré' || Number(e.auto_click_count) > 0) stats.delivered++
     if (opened) stats.opened++
     if (clicked) stats.clicked++
     if (e.bounced_at || e.statut === 'bounce') stats.bounced++
@@ -228,7 +270,7 @@ export async function purgeExpired(maxBatches = 20, batchSize = 200): Promise<nu
 
     const pipe = kv.pipeline()
     for (const { id, entry } of all) {
-      pipe.del(KEYS.track(id), KEYS.body(id), KEYS.sendResult(id), KEYS.noteLock(id, 'opened'), KEYS.noteLock(id, 'clicked'))
+      pipe.del(KEYS.track(id), KEYS.body(id), KEYS.clicks(id), KEYS.sendResult(id), KEYS.noteLock(id, 'opened'), KEYS.noteLock(id, 'clicked'))
       pipe.zrem(KEYS.relancesDue, id)
       if (entry?.commercial_key) pipe.zrem(KEYS.byCommercial(entry.commercial_key), id)
       if (entry?.contact_id) pipe.zrem(KEYS.byContact(entry.contact_id), id)

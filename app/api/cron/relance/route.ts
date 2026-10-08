@@ -82,7 +82,7 @@ export async function GET(req: NextRequest) {
 }
 
 function buildSlackMessage(item: any): string {
-  return `*📬 Relance J+3 — ${item.ps_nom}*
+  return `*📬 Relance à faire : ${item.ps_nom}*
 
 Tu avais envoyé un mail le ${formatDate(item.sent_at)} à *${item.ps_nom}* pour la formation *"${item.formation_nom}"* (N° ${item.formation_numero}).
 
@@ -101,7 +101,7 @@ La formation "${item.formation_nom}" est toujours disponible et intégralement p
 ${item.commercial_name}
 ---
 
-👉 Contact HubSpot : https://app-eu1.hubspot.com/contacts/26228968/contacts/${item.ps_hubspot_id}`
+👉 Fiche HubSpot : https://app-eu1.hubspot.com/contacts/26228968/contacts/${item.ps_hubspot_id}`
 }
 
 function formatDate(iso: string): string {

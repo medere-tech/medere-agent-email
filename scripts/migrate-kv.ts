@@ -5,6 +5,7 @@
  *   node scripts/migrate-kv.ts --host=<hôte> --export                 sauvegarde complète (JSON horodaté)
  *   node scripts/migrate-kv.ts --host=<hôte> --dry-run                rapport, aucune écriture
  *   node scripts/migrate-kv.ts --host=<hôte>                          migration réelle
+ *   node scripts/migrate-kv.ts --host=<hôte> --verify                 contrôle compteurs / faits (aucune écriture)
  *   node scripts/migrate-kv.ts --host=<hôte> --restore=<fichier>      plan de restauration (aucune écriture)
  *   node scripts/migrate-kv.ts --host=<hôte> --restore=<fichier> --confirm   restauration réelle
  *
@@ -33,6 +34,7 @@ import {
   KEYS,
   MIGRATE_SCRIPT,
   SCHEMA_VERSION,
+  STAT_FIELDS,
   dayInTimezone,
   dayStartMs,
   slugify,
@@ -310,7 +312,7 @@ function contributions(e: Entry): Record<string, number> {
   const r = rank[e.statut] ?? 0
   return {
     sent: 1,
-    delivered: isset(e.delivered_at) || opened || isset(e.first_auto_opened_at) || isset(e.first_auto_clicked_at) || (r >= 1 && r <= 3) || complained ? 1 : 0,
+    delivered: isset(e.delivered_at) || opened || Number(e.auto_click_count) > 0 || (r >= 1 && r <= 3) || complained ? 1 : 0,
     opened: opened ? 1 : 0,
     clicked: clicked ? 1 : 0,
     bounced: isset(e.bounced_at) || e.statut === 'bounce' ? 1 : 0,
@@ -456,9 +458,94 @@ async function migrate(host: string, dryRun: boolean): Promise<void> {
     `${orphans.length} relance(s) en legacy. ${KEYS.schemaVersion} = ${SCHEMA_VERSION}.`)
 }
 
+// ─── Vérification (aucune écriture) ───────────────────────────────────────────
+// Recalcule les compteurs attendus à partir des marqueurs counted_* de chaque envoi v2
+// et les compare aux hash stats:day:* ; contrôle aussi que chaque fait (ouvert, cliqué…)
+// est compté exactement une fois. Exit 1 s'il y a un écart.
+async function verify(): Promise<void> {
+  console.log('=== VÉRIFICATION : aucune écriture ===\n')
+  const trackKeys = await scan('email_track:*')
+  const raws = await pipeline(trackKeys.map((k) => ['GET', k]))
+  const expected = new Map<string, Map<string, number>>()
+  const incoherent: string[] = []
+  let v2 = 0
+  let legacy = 0
+  const bump = (day: string, field: string) => {
+    const h = expected.get(day) || new Map<string, number>()
+    h.set(field, (h.get(field) || 0) + 1)
+    expected.set(day, h)
+  }
+
+  trackKeys.forEach((key, i) => {
+    let e: Entry
+    try {
+      e = typeof raws[i] === 'string' ? JSON.parse(raws[i]) : raws[i]
+    } catch {
+      incoherent.push(`${key} : illisible`)
+      return
+    }
+    if (e.v !== 2) {
+      legacy++
+      return
+    }
+    v2++
+    const prefix = e.kind === 'relance' ? 'relance_' : ''
+    const facts: Record<string, boolean> = {
+      sent: true,
+      delivered: isset(e.delivered_at) || isset(e.first_opened_at) || isset(e.first_clicked_at) || Number(e.auto_click_count) > 0 ||
+        ['délivré', 'ouvert', 'cliqué', 'plainte'].includes(e.statut) || isset(e.complained_at),
+      opened: isset(e.first_opened_at) || isset(e.first_clicked_at),
+      clicked: isset(e.first_clicked_at),
+      bounced: isset(e.bounced_at) || e.statut === 'bounce',
+      complained: isset(e.complained_at) || e.statut === 'plainte',
+    }
+    for (const field of STAT_FIELDS) {
+      const counted = e[`counted_${field}`] === true
+      if (counted !== facts[field]) {
+        incoherent.push(`${key} : ${field} ${facts[field] ? 'constaté mais non compté' : 'compté sans fait constaté'}`)
+      }
+      if (counted) {
+        bump(e.sent_day, prefix + field)
+        if (e.commercial_key) bump(e.sent_day, `${prefix}${field}|${e.commercial_key}`)
+      }
+    }
+  })
+
+  const statKeys = await scan('stats:day:*')
+  const hashes = await pipeline(statKeys.map((k) => ['HGETALL', k]))
+  const actual = new Map<string, Map<string, number>>()
+  statKeys.forEach((k, i) => {
+    const flat = (hashes[i] || []) as string[]
+    const h = new Map<string, number>()
+    for (let j = 0; j < flat.length; j += 2) h.set(flat[j], Number(flat[j + 1]))
+    actual.set(k.slice('stats:day:'.length), h)
+  })
+
+  const gaps: string[] = []
+  for (const day of Array.from(new Set(Array.from(expected.keys()).concat(Array.from(actual.keys()))))) {
+    const exp = expected.get(day) || new Map<string, number>()
+    const act = actual.get(day) || new Map<string, number>()
+    for (const field of Array.from(new Set(Array.from(exp.keys()).concat(Array.from(act.keys()))))) {
+      const a = act.get(field) || 0
+      const x = exp.get(field) || 0
+      if (a !== x) gaps.push(`stats:day:${day} ${field} : compteur ${a}, attendu ${x}`)
+    }
+  }
+
+  console.log(`Envois : ${v2} en v2, ${legacy} non migré(s) (non comptés par construction).`)
+  console.log(`Jours de compteurs : ${actual.size} existant(s), ${expected.size} attendu(s).`)
+  console.log(`Écarts de compteurs : ${gaps.length}`)
+  for (const g of gaps.slice(0, 100)) console.log(`  - ${g}`)
+  console.log(`Incohérences fait / comptage : ${incoherent.length}`)
+  for (const x of incoherent.slice(0, 100)) console.log(`  - ${x}`)
+  if (gaps.length || incoherent.length) process.exit(1)
+  console.log('\nOK : chaque fait est compté exactement une fois.')
+}
+
 async function main(): Promise<void> {
   const host = assertHost()
   const restorePath = option('restore')
+  if (flag('verify')) return verify()
   if (flag('export')) return exportAll(host)
   if (restorePath) return restore(host, resolve(restorePath), flag('confirm'))
   return migrate(host, flag('dry-run'))

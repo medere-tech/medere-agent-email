@@ -324,6 +324,7 @@ Les noms de clés et les scripts Lua sont centralisés dans `lib/kv-schema.ts`. 
 |-----|------|---------|------------|-----------|
 | `email_track:{resend_id}` | JSON | Données de l'envoi (détail ci-dessous) | aucune — purge RGPD | `/api/send` (création NX), webhook, migration |
 | `email_body:{resend_id}` | JSON | `{ corps }` du mail, pour pré-remplir une relance | 90 jours (`EMAIL_BODY_TTL_DAYS`) | `/api/send`, migration |
+| `email_clicks:{resend_id}` | liste | 20 derniers clics : heure, lien, automatique ou non et raison (`rafale` / `robot`) — ni adresse IP ni navigateur | 7 jours (`CLICK_HISTORY_TTL_DAYS`) | webhook |
 | `emails_index` | sorted set | `resend_id` des envois initiaux, score = date d'envoi (ms) | aucune — purge RGPD | `/api/send` |
 | `idx:commercial:{clé}` | sorted set | Envois d'un commercial (clé = email en minuscules, ou `nom:{slug}` pour un ancien envoi non rattaché) | aucune — purge RGPD | `/api/send`, migration |
 | `idx:contact:{contactId}` | sorted set | Envois à un contact HubSpot (alerte « déjà contacté ») | aucune — purge RGPD | `/api/send`, migration |
@@ -337,20 +338,39 @@ Les noms de clés et les scripts Lua sont centralisés dans `lib/kv-schema.ts`. 
 | `relance:{timestamp}` | JSON | **Ancien format** de relance, repris par la migration | ≈ J+7 | (plus écrit) |
 
 Champs de `email_track` : les champs historiques (`contact_id`, `ps_nom`, `ps_email`, `commercial_name`, `formation_nom`, `sujet`, `statut`, `sent_at`, `opened_at`, `clicked_at`) sont conservés tels quels, si bien qu'une entrée v2 reste lisible par l'ancien code. Champs ajoutés :
-`v` (2), `kind` (`initial` / `relance`), `sent_day`, `commercial_key`, `commercial_email`, `commercial_slack_id`, `commercial_hubspot_id`, `ps_rpps`, `formation_numero`, `relance_due_day`, `message_id`, `delivered_at`, `bounced_at`, `complained_at`, `first_opened_at`, `first_clicked_at`, `last_opened_at`, `open_count`, `click_count`, `auto_open_count`, `auto_click_count`, `first_auto_opened_at`, `first_auto_clicked_at`, et les drapeaux internes `counted_*` (un fait n'est compté qu'une fois).
+`v` (2), `kind` (`initial` / `relance`), `sent_day`, `commercial_key`, `commercial_email`, `commercial_slack_id`, `commercial_hubspot_id`, `ps_rpps`, `formation_numero`, `relance_due_day`, `message_id`, `delivered_at`, `bounced_at`, `complained_at`, `first_opened_at`, `first_clicked_at`, `last_opened_at`, `open_count`, `click_count`, `auto_click_count`, et les drapeaux internes `counted_*` (un fait n'est compté qu'une fois).
 
 ### Statuts
-- **Envoyé** : mail transmis via Resend
-- **Délivré** : accepté par le serveur du PS (`email.delivered`)
-- **Ouvert** : le PS a ouvert le mail (ouverture non automatique)
-- **Cliqué** : le PS a cliqué un lien (clic non automatique)
-- **Bounce** : adresse rejetée (`email.bounced`) — état final
-- **Plainte** : le PS a signalé le mail comme spam (`email.complained`) — état final
+Libellés affichés (la valeur stockée dans `email_track.statut` est entre parenthèses) :
+- **Envoyé** (`envoyé`) : mail transmis via Resend
+- **Reçu** (`délivré`) : accepté par le serveur du PS (`email.delivered`)
+- **Ouvert** (`ouvert`) : le PS a ouvert le mail
+- **Lien cliqué** (`cliqué`) : le PS a cliqué un lien (clic non automatique)
+- **Adresse invalide** (`bounce`) : adresse rejetée (`email.bounced`) — état final
+- **Signalé comme indésirable** (`plainte`) : le PS a signalé le mail comme spam (`email.complained`) — état final
 
-Le statut est **monotone** (envoyé < délivré < ouvert < cliqué) : un événement plus faible ne le fait jamais redescendre. **Bounce et plainte sont prioritaires** sur tous les autres (une plainte prime sur un bounce). Les dates `first_*` sont écrites une seule fois ; `last_opened_at`, `open_count` et `click_count` suivent chaque ouverture et clic.
+Le statut est **monotone** (envoyé < délivré < ouvert < cliqué) : un événement plus faible ne le fait jamais redescendre. **Bounce et plainte sont prioritaires** sur tous les autres (une plainte prime sur un bounce). Les dates `first_*` sont écrites une seule fois ; `last_opened_at`, `open_count` et `click_count` suivent chaque ouverture et clic humain. Seule exception à la monotonie : un clic reclassé automatique après coup (voir ci-dessous) peut faire redescendre « Lien cliqué » au statut précédent.
 
 ### Ouvertures et clics automatiques
-Une ouverture ou un clic survenu **moins de 60 secondes après la livraison** (à défaut, après l'envoi) est marqué « probablement automatique » : antivirus, passerelles de sécurité, proxys de messagerie (`AUTO_EVENT_WINDOW_SECONDS` dans `lib/config.ts`). Il est stocké (`auto_open_count`, `first_auto_*_at`) mais ne fait pas avancer le statut, ne compte pas dans les taux et ne crée ni Note HubSpot ni notification. La première ouverture humaine qui suit est comptée normalement. La date de référence est celle de l'événement chez Resend (`created_at`), pas celle de réception.
+**Par défaut, toute ouverture et tout clic est humain** : le commercial envoie souvent le mail pendant l'appel et le PS l'ouvre dans la seconde — ce sont les meilleurs signaux. Un événement n'est classé « automatique » (antivirus, filtre de sécurité de l'établissement) que sur des signes fiables.
+
+Ce que Resend fournit (documentation consultée le 8 octobre 2026) :
+- `email.opened` : **ni navigateur, ni adresse IP, ni heure d'ouverture** ([doc](https://resend.com/docs/webhooks/emails/opened)). Les ouvertures sont donc **toujours humaines**.
+- `email.clicked` : objet `click` avec `ipAddress`, `link`, `timestamp` (heure réelle du clic) et `userAgent` ([doc](https://resend.com/docs/webhooks/emails/clicked)).
+
+Règle appliquée aux clics (constantes dans `lib/config.ts`) :
+- **Rafale** : un autre lien du même mail a été cliqué à moins de 2 secondes (`CLICK_BURST_SECONDS`), d'après l'heure réelle des clics et non leur heure d'arrivée. Tous les clics de la rafale sont automatiques, y compris ceux déjà enregistrés : s'ils avaient été comptés, le comptage est annulé (compteurs, `click_count`, statut). Deux clics sur le **même** lien restent humains.
+- **Robot** : navigateur vide ou contenant une signature connue (`BOT_USER_AGENTS` : bot, crawler, spider, curl, wget, python-requests, go-http-client, headlesschrome, barracuda, mimecast, proofpoint).
+- **Pas de classement par adresse IP** : il n'existe pas de liste fiable des adresses des filtres de sécurité.
+- **Données conservées** : ni l'adresse IP ni le navigateur ; seulement, pour chaque clic, l'heure, le lien, le classement et sa raison (`email_clicks:{id}`, 7 jours).
+- Un clic automatique est stocké (`auto_click_count`) mais ne fait pas avancer le statut, ne compte pas dans les taux et ne crée ni Note HubSpot ni notification. Il prouve en revanche la livraison (« Reçu »).
+- La Note HubSpot du premier clic est créée **3 secondes après** (`FIRST_CLICK_CONFIRM_DELAY_MS`), une fois le premier clic humain relu : un clic reclassé entre-temps ne crée pas de Note.
+
+**Limites connues :**
+- Les ouvertures déclenchées sans lecture (Apple Mail Privacy Protection, proxys qui préchargent les images) restent comptées comme des ouvertures : Resend ne fournit rien pour les distinguer.
+- Un antivirus qui clique **un seul** lien avec un navigateur ordinaire n'est pas détecté.
+- Si les webhooks d'une même rafale arrivent à plus de 3 secondes d'écart, la Note « Lien cliqué » peut être créée avant le reclassement : les compteurs et le statut sont corrigés, mais la Note reste (journal : « clic(s) précédent(s) reclassé(s) automatique(s) »).
+- Un vrai PS qui clique deux liens différents en moins de 2 secondes est classé automatique (cas très improbable).
 
 ### Stats
 Les stats d'une période sont la **somme des compteurs journaliers** `stats:day:*` des jours de la période : plus aucune lecture de tout l'historique. Un envoi est compté au **jour de son envoi** (heure de Paris) : une ouverture le 5 d'un mail envoyé le 1er compte pour le 1er, ce qui garde les taux sous 100 %.
@@ -363,7 +383,7 @@ PS (nom + email) · Commercial · Formation · Statut · Envoyé · Lien HubSpot
 
 ### Rétention RGPD
 Les envois sont conservés **3 ans** : constante `RETENTION_DAYS = 1095` en haut de `lib/config.ts`.
-- Le cron quotidien purge les envois plus anciens : `email_track`, `email_body`, `send_result`, verrous `hubspot_note:*`, entrées de `emails_index`, `idx:commercial:*`, `idx:contact:*` et `relances_due` (et la relance rattachée à l'envoi, lot 3). Le nombre d'envois purgés est renvoyé dans `purged`.
+- Le cron quotidien purge les envois plus anciens : `email_track`, `email_body`, `email_clicks`, `send_result`, verrous `hubspot_note:*`, entrées de `emails_index`, `idx:commercial:*`, `idx:contact:*` et `relances_due` (et la relance rattachée à l'envoi, lot 3). Le nombre d'envois purgés est renvoyé dans `purged`.
 - Les compteurs `stats:day:*` expirent d'eux-mêmes (EXPIREAT fin du jour + `RETENTION_DAYS`).
 - Le corps des mails (`email_body`) n'est gardé que 90 jours (`EMAIL_BODY_TTL_DAYS`) : il ne sert qu'à pré-remplir une relance. **Limite** : pour un mail plus ancien, le corps est redemandé à Resend (`GET /emails/{id}`) ; si Resend ne le fournit plus (durée de conservation de Resend dépassée), la relance s'ouvre **sans le corps d'origine**, avec un message qui l'indique, et le commercial complète le texte ou le fait régénérer par Claude.
 - **Seul le KV est purgé** : les Notes HubSpot ne sont pas concernées.
@@ -377,6 +397,7 @@ H=<hôte de la base KV de production>                                   # ex. xx
 node scripts/migrate-kv.ts --host=$H --export                         # 1. sauvegarde complète (backups/kv-export-<hôte>-<date>.json)
 node scripts/migrate-kv.ts --host=$H --dry-run                        # 2. rapport, aucune écriture
 node scripts/migrate-kv.ts --host=$H                                  # 3. migration (refusée sans export de moins d'une heure)
+node scripts/migrate-kv.ts --host=$H --verify                         # 4. contrôle : chaque fait compté une seule fois (aucune écriture)
 # retour arrière si besoin :
 node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json            # plan, aucune écriture
 node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json --confirm  # restauration
@@ -384,6 +405,20 @@ node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json --confirm 
 - Node ≥ 22.18 (le script TypeScript s'exécute sans compilation ni dépendance).
 - `.env.local` (ou `ENV_FILE=<fichier>`) doit contenir les `KV_REST_API_*` de la base visée, et `AIRTABLE_*`.
 - **Idempotente** : une entrée déjà migrée est ignorée ; relancer la commande ne change rien.
+- **Une seule entrée par mail** : la clé est le `resend_id` du mail. Chaque fait (reçu, ouvert, lien cliqué…) est compté une seule fois grâce aux marqueurs `counted_*`, même si des webhooks arrivent pendant la migration (testé). `--verify` recalcule les compteurs attendus à partir de ces marqueurs, les compare aux `stats:day:*` et contrôle la cohérence fait / comptage ; il sort en erreur au moindre écart.
+- Deux mails réellement envoyés en double (avant l'idempotence) restent **deux** entrées : aucun mail envoyé n'est supprimé ni fusionné.
+
+### Notes HubSpot en double — `scripts/dedupe-hubspot-notes.ts`
+Avant la phase 1, le webhook créait une Note « Email ouvert » / « Email cliqué » à chaque événement. Le script archive les doublons (à lancer après la migration) :
+```bash
+node scripts/dedupe-hubspot-notes.ts --host=$H                 # rapport par contact, aucune modification (mode par défaut)
+node scripts/dedupe-hubspot-notes.ts --host=$H --apply         # archive les doublons
+# options : --contact=<id> (un seul contact), --subject-prefix=<texte> (sujets commençant par…)
+```
+- Contacts examinés : ceux présents dans le KV (contacts réellement écrits par l'agent). `.env.local` doit contenir `HUBSPOT_TOKEN` et les `KV_REST_API_*` de la base visée.
+- **Seules les Notes au format exact de l'agent** sont prises en compte (« 👁️ Email ouvert le… », « 🖱️ Email cliqué le… » ou « 🖱️ Lien cliqué le… », suivies de « Sujet : » et « Commercial : »). Les Notes saisies à la main et les Notes « Email envoyé » ne sont jamais touchées.
+- Regroupement par contact, type, sujet et commercial. S'il existe **exactement un** mail correspondant dans le KV, la Note la plus ancienne est gardée et les autres sont archivées (corbeille HubSpot, récupérables 90 jours). Sinon (0 ou plusieurs mails avec ce sujet) : cas **ambigu**, rien n'est touché, signalé dans le rapport.
+- Le script ne modifie jamais le KV.
 - **Correspondance nom → email** : les anciens envois ne stockaient que le nom du commercial. Un nom n'est rattaché à un email que s'il correspond à **une seule** fiche Commerciaux **et** que le prénom de la fiche correspond à l'email (« Sarah Smadja » → `sarah.s@`). Sinon, la clé est `nom:{slug}` et le cas est listé dans le rapport `--dry-run` (ex. « Loane Deluge » dont la fiche porte `justine.m@`).
 - **Restauration** : réécrit les clés de l'export (valeur et TTL restant au moment de l'export) et supprime les clés créées depuis. Les écritures faites entre l'export et la restauration (nouveaux envois, webhooks) sont perdues.
 - Les exports contiennent des données personnelles : les garder hors du dépôt (`backups/` est ignoré par git) et les supprimer après usage.
@@ -405,7 +440,7 @@ https://medere-agent-email-dpc.vercel.app/api/webhooks/resend
 2. Signature valide → réponse **200** dans tous les cas ; une erreur de traitement est journalisée (`[WEBHOOK] Erreur de traitement`) mais ne provoque pas de rejeu par Resend.
 3. Dédoublonnage par `svix-id` (`webhook_event:*`).
 4. Mise à jour atomique de `email_track:{id}` **et** des compteurs du jour d'envoi par un script Lua (`EVENT_SCRIPT`, voir Statuts). Le `message_id` fourni par Resend est enregistré (fil de discussion des relances). Un `email_id` absent du KV (ex. copie commerciale) est ignoré.
-5. Une seule Note HubSpot par type (première ouverture humaine, premier clic humain), jamais pour un événement automatique ni pour délivré / bounce / plainte (`hubspot_note:*`). Si HubSpot échoue, le verrou est relâché : l'événement suivant du même type recréera la Note.
+5. Une seule Note HubSpot par type (« Email ouvert » à la première ouverture, « Lien cliqué » au premier clic humain, confirmé 3 secondes après), jamais pour un clic automatique ni pour reçu / adresse invalide / signalé comme indésirable (`hubspot_note:*`). Si HubSpot échoue, le verrou est relâché : l'événement suivant du même type recréera la Note.
 
 ---
 
@@ -421,7 +456,7 @@ Sujet : {sujet}
 {corps du mail}
 ```
 
-La note est associée au contact via `associationTypeId: 202`. Les ouvertures et clics ajoutent une Note « Email ouvert » / « Email cliqué » (une seule de chaque par email).
+La note est associée au contact via `associationTypeId: 202`. Les ouvertures et clics ajoutent une Note « 👁️ Email ouvert le… » / « 🖱️ Lien cliqué le… » (une seule de chaque par email ; ancien libellé : « Email cliqué »).
 
 ### Scopes requis sur la Private App HubSpot
 - `crm.objects.contacts.read` — recherche contacts
@@ -524,8 +559,8 @@ Si le domaine Vercel change :
 - Pour e-learning : date de fin pas encore dépassée ?
 - Liée à la bonne formation via `Numéro d'action DPC` ?
 
-### Bandeau rouge « Impossible de charger … : Airtable 4xx/5xx »
-L'erreur Airtable est affichée telle quelle. Vérifier `AIRTABLE_TOKEN` / `AIRTABLE_BASE_ID` et les logs Vercel.
+### Bandeau rouge « Impossible de charger … »
+Le message affiché reste lisible pour le commercial ; le détail technique (code Airtable) est dans les logs Vercel (`[FORMATIONS]`, `[SESSIONS]`, `[COMMERCIAUX]`). Vérifier `AIRTABLE_TOKEN` / `AIRTABLE_BASE_ID` et les logs Vercel.
 
 ### « HubSpot indisponible, ne crée pas le contact »
 HubSpot n'a pas répondu (token, quota, panne). Ne pas créer le contact : réessayer plus tard. Logs Vercel → chercher `[CONTACT-SEARCH]`.
@@ -545,7 +580,7 @@ HubSpot n'a pas répondu (token, quota, panne). Ne pas créer le contact : rées
 ### Erreur 500 sur /api/sessions
 Vérifier que le champ `Format` est bien dans les fields chargés dans `getSessionsByFormation`.
 
-### Erreur 500 « Configuration serveur invalide »
+### « Service momentanément indisponible. Préviens Déthié. » (erreur 500)
 `NEXTAUTH_SECRET` ou `CRON_SECRET` est absent des variables d'environnement. Logs : `[AUTH] NEXTAUTH_SECRET manquant` ou `[CRON] CRON_SECRET manquant`.
 
 ### Un commercial ne peut plus se connecter

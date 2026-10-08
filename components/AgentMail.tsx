@@ -10,21 +10,34 @@ interface HSContact { id: string; firstname: string; lastname: string; email: st
 
 type Step = 1 | 2 | 3 | 4 | 5 | 6
 
+const SESSION_EXPIRED = 'Session expirée, reconnecte-toi.'
+
 // fetch + contrôle de res.ok. Lève une erreur lisible si la réponse est en erreur
 // ou n'est pas du JSON (ex. session expirée : le middleware redirige vers /login).
 async function fetchJson(url: string, init?: RequestInit) {
-  const res = await fetch(url, init)
+  let res: Response
+  try {
+    res = await fetch(url, init)
+  } catch {
+    throw new Error('Connexion impossible. Vérifie ta connexion internet puis réessaie.')
+  }
   if (res.redirected && new URL(res.url).pathname === '/login') {
-    throw new Error('Session expirée, reconnecte-toi.')
+    throw new Error(SESSION_EXPIRED)
   }
   let data: any
   try {
     data = await res.json()
   } catch {
-    throw new Error(`Réponse invalide du serveur (${res.status})`)
+    throw new Error('Une erreur est survenue. Réessaie dans quelques instants.')
   }
-  if (!res.ok) throw new Error(data?.error || `Erreur serveur (${res.status})`)
+  if (!res.ok) throw new Error(data?.error || 'Une erreur est survenue. Réessaie dans quelques instants.')
   return data
+}
+
+// Message d'erreur de chargement lisible : le détail technique reste dans les journaux du serveur
+function loadError(e: any, what: string): string {
+  if (e?.message === SESSION_EXPIRED) return SESSION_EXPIRED
+  return `Impossible de charger ${what}. Réessaie dans quelques instants.`
 }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
@@ -256,7 +269,7 @@ export default function AgentMail() {
   useEffect(() => {
     fetchJson('/api/commerciaux')
       .then((d) => setCommerciauxList(d.commerciaux || []))
-      .catch((e) => setError(`Impossible de charger les commerciaux : ${e.message}`))
+      .catch((e) => setError(loadError(e, 'la liste des commerciaux')))
   }, [])
 
   // Load formations when step 2
@@ -265,7 +278,7 @@ export default function AgentMail() {
       setLoadingFormations(true)
       fetchJson('/api/formations')
         .then((d) => setFormationsList(d.formations || []))
-        .catch((e) => setError(`Impossible de charger les formations : ${e.message}`))
+        .catch((e) => setError(loadError(e, 'la liste des formations')))
         .finally(() => setLoadingFormations(false))
     }
   }, [step, formations.length])
@@ -278,7 +291,7 @@ export default function AgentMail() {
     setSelectedSessions([])
     fetchJson(`/api/sessions?formationId=${formation.id}&format=${encodeURIComponent(formation.format)}`)
       .then((d) => setSessionsList(d.sessions || []))
-      .catch((e) => setError(`Impossible de charger les sessions : ${e.message}`))
+      .catch((e) => setError(loadError(e, 'les sessions')))
       .finally(() => setLoadingSessions(false))
   }, [formation])
 
@@ -786,22 +799,22 @@ export default function AgentMail() {
                 />
                 <StatusRow
                   icon={<Icons.Mail />}
-                  label="Activité HubSpot"
+                  label="Fiche HubSpot du PS"
                   ok={sendResult.hubspot_logged}
-                  detail={sendResult.hubspot_logged ? 'Note ajoutée sur la fiche du PS' : 'Erreur'}
+                  detail={sendResult.hubspot_logged ? 'Note ajoutée sur la fiche du PS' : 'Note non ajoutée (le mail est bien parti)'}
                 />
                 <StatusRow
                   icon={<Icons.Calendar />}
-                  label="Relance J+3 programmée"
+                  label="Rappel de relance programmé"
                   ok={sendResult.relance_stored}
-                  detail={sendResult.relance_stored ? `Le ${formatDateShort(sendResult.relance_date)}` : 'Vercel KV non configuré'}
+                  detail={sendResult.relance_stored ? `Le ${formatDateShort(sendResult.relance_date)}` : 'Rappel non programmé'}
                 />
               </div>
 
               {/* Pending actions */}
               {!sendResult.relance_stored && (
                 <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-700 space-y-1">
-                  <p>⚠️ <strong>Relance J+3 :</strong> Configure Vercel KV dans le dashboard Vercel et ajoute les env vars <code>KV_REST_API_URL</code> + <code>KV_REST_API_TOKEN</code>.</p>
+                  <p>Le rappel n'a pas pu être programmé : pense à relancer ce PS toi-même dans 3 jours.</p>
                 </div>
               )}
 

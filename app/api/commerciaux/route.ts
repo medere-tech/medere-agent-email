@@ -6,6 +6,7 @@ export async function GET() {
     const commerciaux = await getCommerciauxActifs()
     return NextResponse.json({ commerciaux })
   } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    console.error('[COMMERCIAUX] Chargement impossible:', e.message)
+    return NextResponse.json({ error: 'Impossible de charger la liste des commerciaux. Réessaie dans quelques instants.' }, { status: 500 })
   }
 }

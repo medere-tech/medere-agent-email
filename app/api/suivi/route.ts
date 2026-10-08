@@ -11,7 +11,7 @@ const NO_STORE = { 'Cache-Control': 'no-store' }
 export async function GET(req: NextRequest) {
   try {
     if (!kvConfigured()) {
-      return NextResponse.json({ error: 'KV non configuré' }, { status: 500 })
+      return NextResponse.json({ error: "Le suivi est momentanément indisponible. Réessaie dans quelques instants." }, { status: 500 })
     }
 
     const kv = getKv()
@@ -68,7 +68,7 @@ export async function GET(req: NextRequest) {
     }, { headers: NO_STORE })
   } catch (e: any) {
     console.error('[SUIVI] Erreur:', e.message)
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    return NextResponse.json({ error: "Le suivi est momentanément indisponible. Réessaie dans quelques instants." }, { status: 500 })
   }
 }
 

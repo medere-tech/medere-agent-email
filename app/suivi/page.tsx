@@ -117,11 +117,11 @@ const Icons = {
 function StatutBadge({ statut }: { statut: EmailEntry['statut'] }) {
   const config: Record<string, { icon: React.ReactNode; label: string; cls: string }> = {
     envoyé:  { icon: <Icons.Send />,  label: 'Envoyé',  cls: 'bg-zinc-100 text-zinc-500' },
-    délivré: { icon: <Icons.Delivered />, label: 'Délivré', cls: 'bg-zinc-100 text-zinc-700' },
+    délivré: { icon: <Icons.Delivered />, label: 'Reçu', cls: 'bg-zinc-100 text-zinc-700' },
     ouvert:  { icon: <Icons.Eye />,   label: 'Ouvert',  cls: 'bg-zinc-900 text-white' },
-    cliqué:  { icon: <Icons.Click />, label: 'Cliqué',  cls: 'bg-zinc-900 text-white' },
-    bounce:  { icon: <Icons.Alert />, label: 'Bounce',  cls: 'border border-zinc-400 text-zinc-700' },
-    plainte: { icon: <Icons.Alert />, label: 'Plainte', cls: 'border border-zinc-400 text-zinc-700' },
+    cliqué:  { icon: <Icons.Click />, label: 'Lien cliqué', cls: 'bg-zinc-900 text-white' },
+    bounce:  { icon: <Icons.Alert />, label: 'Adresse invalide', cls: 'border border-zinc-400 text-zinc-700' },
+    plainte: { icon: <Icons.Alert />, label: 'Signalé comme indésirable', cls: 'border border-zinc-400 text-zinc-700' },
   }
   const c = config[statut] ?? config['envoyé']
   return (
@@ -194,10 +194,10 @@ export default function SuiviPage() {
     setError('')
     try {
       const res = await fetch(`/api/suivi?page=${p}`, { cache: 'no-store' })
-      if (!res.ok) throw new Error('Erreur serveur')
+      if (!res.ok) throw new Error("Impossible d'afficher le suivi. Réessaie dans quelques instants.")
       setData(await res.json())
     } catch (e: any) {
-      setError(e.message)
+      setError("Impossible d'afficher le suivi. Réessaie dans quelques instants.")
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -285,7 +285,7 @@ export default function SuiviPage() {
             <StatCard
               label="Taux de clic"
               value={pct(data.stats.cliques, data.stats.total)}
-              sub={`${data.stats.cliques.toLocaleString('fr-FR')} cliqué${data.stats.cliques > 1 ? 's' : ''}`}
+              sub={`${data.stats.cliques.toLocaleString('fr-FR')} avec lien cliqué`}
             />
           </div>
         )}
@@ -302,7 +302,7 @@ export default function SuiviPage() {
 
           {!loading && error && (
             <div className="flex flex-col items-center justify-center py-24 gap-2 text-zinc-500">
-              <span className="text-sm">Erreur : {error}</span>
+              <span className="text-sm">{error}</span>
               <button onClick={() => fetchData(page)} className="text-xs text-zinc-400 underline">
                 Réessayer
               </button>
@@ -422,18 +422,18 @@ export default function SuiviPage() {
                                       {email.clicked_at ? (
                                         <div className="flex items-center gap-2 text-zinc-800">
                                           <Icons.Click />
-                                          <span>Cliqué le {formatFull(email.clicked_at)}</span>
+                                          <span>Lien cliqué le {formatFull(email.clicked_at)}</span>
                                         </div>
                                       ) : (
                                         <div className="flex items-center gap-2 text-zinc-300">
                                           <Icons.Click />
-                                          <span>Pas encore cliqué</span>
+                                          <span>Aucun lien cliqué</span>
                                         </div>
                                       )}
                                     </div>
                                   </div>
                                   <div>
-                                    <div className="text-zinc-400 mb-1.5 font-medium">ID Resend</div>
+                                    <div className="text-zinc-400 mb-1.5 font-medium">Référence de l'envoi</div>
                                     <div className="font-mono text-zinc-400 text-[10px] break-all">{email.resend_id}</div>
                                   </div>
                                 </div>
@@ -495,7 +495,7 @@ export default function SuiviPage() {
         </div>
 
         <div className="mt-4 text-center text-xs text-zinc-400">
-          Actualisation automatique toutes les 60s ·{' '}
+          Mise à jour automatique toutes les minutes ·{' '}
           <button className="hover:underline" onClick={() => fetchData(page, true)}>
             Forcer l'actualisation
           </button>

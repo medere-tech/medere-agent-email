@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
     const { commercial, ps, formation, sujet, corps } = payload
 
     if (!ps.email) {
-      return NextResponse.json({ error: 'Email du PS manquant' }, { status: 400 })
+      return NextResponse.json({ error: "Ce contact n'a pas d'adresse email dans HubSpot." }, { status: 400 })
     }
 
     const domain = process.env.RESEND_FROM_DOMAIN || 'medere.fr'
@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
       console.error('Resend error:', e.message)
       return NextResponse.json({
         success: false,
-        error: `Erreur envoi email : ${e.message}`,
+        error: "Le mail n'a pas pu être envoyé. Réessaie dans quelques instants ; si le problème persiste, préviens Déthié.",
       }, { status: 500 })
     }
 
@@ -171,6 +171,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result)
   } catch (e: any) {
     console.error('Send error:', e)
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    return NextResponse.json({ error: "Le mail n'a pas pu être envoyé. Réessaie dans quelques instants ; si le problème persiste, préviens Déthié." }, { status: 500 })
   }
 }

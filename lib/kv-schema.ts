@@ -5,6 +5,8 @@
 // Clés :
 //   email_track:{id}          JSON de l'envoi (format historique + champs v2), sans TTL, purgé par le cron
 //   email_body:{id}           JSON { corps } du mail, TTL EMAIL_BODY_TTL_DAYS
+//   email_clicks:{id}         liste des derniers clics { t, i, l, a, r } (heure, lien, automatique, raison),
+//                             TTL CLICK_HISTORY_TTL_DAYS — sert à détecter les rafales
 //   emails_index              sorted set des envois initiaux (score = date d'envoi en ms)
 //   idx:commercial:{clé}      sorted set des envois (initiaux et relances) d'un commercial
 //   idx:contact:{contactId}   sorted set des envois à un contact HubSpot
@@ -21,6 +23,7 @@ export const KEYS = {
   body: (id: string) => `email_body:${id}`,
   sendResult: (id: string) => `send_result:${id}`,
   noteLock: (id: string, kind: 'opened' | 'clicked') => `hubspot_note:${id}:${kind}`,
+  clicks: (id: string) => `email_clicks:${id}`,
   emailsIndex: 'emails_index',
   byCommercial: (key: string) => `idx:commercial:${key}`,
   byContact: (contactId: string) => `idx:contact:${contactId}`,
@@ -85,6 +88,16 @@ local function promote(d, target)
   if RANK[target] > (RANK[d.statut] or 0) then d.statut = target end
 end
 
+-- Statut recalculé à partir des faits (utilisé seulement quand un clic est reclassé automatique)
+local function computeStatut(d)
+  if isset(d.complained_at) or d.statut == 'plainte' then return 'plainte' end
+  if isset(d.bounced_at) or d.statut == 'bounce' then return 'bounce' end
+  if isset(d.first_clicked_at) then return 'cliqué' end
+  if isset(d.first_opened_at) or isset(d.opened_at) then return 'ouvert' end
+  if isset(d.delivered_at) or d.counted_delivered then return 'délivré' end
+  return 'envoyé'
+end
+
 -- Compte un fait (délivré, ouvert…) une seule fois par envoi, dans le hash du jour
 -- d'envoi. Une entrée non migrée (v ~= 2) n'est pas comptée : la migration le fera.
 local function count(d, statsKey, expireAt, field)
@@ -97,6 +110,18 @@ local function count(d, statsKey, expireAt, field)
     redis.call('HINCRBY', statsKey, prefix .. field .. '|' .. d.commercial_key, 1)
   end
   redis.call('EXPIREAT', statsKey, expireAt)
+end
+
+-- Annule un comptage (clic reclassé automatique après coup)
+local function uncount(d, statsKey, field)
+  if d.v ~= 2 or not d['counted_' .. field] then return end
+  d['counted_' .. field] = nil
+  local prefix = ''
+  if d.kind == 'relance' then prefix = 'relance_' end
+  redis.call('HINCRBY', statsKey, prefix .. field, -1)
+  if isset(d.commercial_key) then
+    redis.call('HINCRBY', statsKey, prefix .. field .. '|' .. d.commercial_key, -1)
+  end
 end
 
 local function encode(d)
@@ -142,18 +167,24 @@ return 1
 // Événement webhook Resend appliqué de façon atomique à email_track + compteurs.
 //   - statut monotone : envoyé < délivré < ouvert < cliqué ; bounce et plainte finaux prioritaires
 //   - first_* écrits une seule fois ; last_opened_at, open_count, click_count mis à jour
-//   - événement automatique (ARGV[3] = '1') : auto_* uniquement, ni statut ni compteur ni Note
+//   - ouverture : toujours humaine
+//   - clic : historique email_clicks:{id} ; automatique si robot (ARGV[3] = '1') ou si un AUTRE lien
+//     a été cliqué à moins de ARGV[8] ms (rafale). Les clics déjà enregistrés de la rafale sont
+//     reclassés : s'ils avaient été comptés, le comptage est annulé et le statut recalculé.
 //   - entrée antérieure aux first_* déjà ouverte/cliquée : date reprise, verrou de Note "legacy"
-// KEYS : 1 track, 2 stats:day (jour d'envoi), 3 hubspot_note:{id}:opened, 4 hubspot_note:{id}:clicked
-// ARGV : 1 delivered|bounced|complained|opened|clicked, 2 date ISO, 3 '1' si automatique,
-//        4 expireAt stats, 5 message_id ('' = inconnu)
-// Retour : { suivi (0|1), Note ouverture à créer (0|1), Note clic à créer (0|1), statut }
+// KEYS : 1 track, 2 stats:day (jour d'envoi), 3 hubspot_note:{id}:opened, 4 hubspot_note:{id}:clicked,
+//        5 email_clicks:{id}
+// ARGV : 1 delivered|bounced|complained|opened|clicked, 2 date ISO de l'événement, 3 '1' si robot,
+//        4 expireAt stats, 5 message_id ('' = inconnu), 6 heure du clic (ms), 7 lien cliqué,
+//        8 fenêtre de rafale (ms), 9 taille max de l'historique, 10 TTL de l'historique (s)
+// Retour : { suivi (0|1), Note ouverture à créer (0|1), Note clic à créer (0|1), statut,
+//            raison si clic automatique ('' | 'robot' | 'rafale'), nombre de clics reclassés }
 export const EVENT_SCRIPT = LUA_COMMON + `
 local raw = redis.call('GET', KEYS[1])
-if not raw then return {0, 0, 0, ''} end
+if not raw then return {0, 0, 0, '', '', 0} end
 local d = cjson.decode(raw)
-local kind, at, auto, expireAt = ARGV[1], ARGV[2], ARGV[3] == '1', tonumber(ARGV[4])
-local noteOpen, noteClick = 0, 0
+local kind, at, robot, expireAt = ARGV[1], ARGV[2], ARGV[3] == '1', tonumber(ARGV[4])
+local noteOpen, noteClick, reason, reclassed = 0, 0, '', 0
 
 if ARGV[5] ~= '' and not isset(d.message_id) then d.message_id = ARGV[5] end
 
@@ -170,42 +201,98 @@ elseif kind == 'complained' then
   count(d, KEYS[2], expireAt, 'delivered')
   count(d, KEYS[2], expireAt, 'complained')
   promote(d, 'plainte')
-elseif kind == 'opened' or kind == 'clicked' then
-  local o = kind == 'opened'
-  local p = o and 'opened' or 'clicked'
-  local firstField, field, cntField = 'first_' .. p .. '_at', p .. '_at', o and 'open_count' or 'click_count'
-  local lock = o and KEYS[3] or KEYS[4]
-  -- une ouverture ou un clic, même automatique, prouve la livraison
+elseif kind == 'opened' then
   count(d, KEYS[2], expireAt, 'delivered')
   promote(d, 'délivré')
-  if auto then
-    local autoCnt = o and 'auto_open_count' or 'auto_click_count'
-    d[autoCnt] = (tonumber(d[autoCnt]) or 0) + 1
-    if not isset(d['first_auto_' .. p .. '_at']) then d['first_auto_' .. p .. '_at'] = at end
+  d.open_count = (tonumber(d.open_count) or 0) + 1
+  d.last_opened_at = at
+  if not isset(d.first_opened_at) then
+    if isset(d.opened_at) then
+      d.first_opened_at = d.opened_at
+      redis.call('SET', KEYS[3], 'legacy')
+    else
+      d.first_opened_at = at
+      d.opened_at = at
+    end
+  end
+  count(d, KEYS[2], expireAt, 'opened')
+  promote(d, 'ouvert')
+  if redis.call('SET', KEYS[3], at, 'NX') then noteOpen = 1 end
+elseif kind == 'clicked' then
+  local t, link, burst = tonumber(ARGV[6]), ARGV[7], tonumber(ARGV[8])
+  local history = {}
+  for _, item in ipairs(redis.call('LRANGE', KEYS[5], 0, -1)) do table.insert(history, cjson.decode(item)) end
+
+  -- un clic, même automatique, prouve la livraison
+  count(d, KEYS[2], expireAt, 'delivered')
+  promote(d, 'délivré')
+
+  if robot then reason = 'robot' end
+  local revertedFirst = false
+  for _, c in ipairs(history) do
+    if c.l ~= link and math.abs(c.t - t) < burst then
+      if reason == '' then reason = 'rafale' end
+      if c.a ~= 1 then
+        c.a = 1
+        c.r = 'rafale'
+        reclassed = reclassed + 1
+        d.click_count = math.max((tonumber(d.click_count) or 0) - 1, 0)
+        d.auto_click_count = (tonumber(d.auto_click_count) or 0) + 1
+        if d.first_clicked_at == c.i then revertedFirst = true end
+      end
+    end
+  end
+
+  if reason ~= '' then
+    d.auto_click_count = (tonumber(d.auto_click_count) or 0) + 1
   else
-    d[cntField] = (tonumber(d[cntField]) or 0) + 1
-    if o then d.last_opened_at = at end
-    if not isset(d[firstField]) then
-      if isset(d[field]) then
-        d[firstField] = d[field]
-        redis.call('SET', lock, 'legacy')
+    d.click_count = (tonumber(d.click_count) or 0) + 1
+  end
+  table.insert(history, { t = t, i = at, l = link, a = (reason ~= '') and 1 or 0, r = reason })
+
+  -- Premier clic reclassé : le premier clic humain restant le remplace, sinon le clic n'est plus compté
+  if revertedFirst then
+    local firstT, firstI = nil, nil
+    for _, c in ipairs(history) do
+      if c.a ~= 1 and (firstT == nil or c.t < firstT) then firstT, firstI = c.t, c.i end
+    end
+    if firstI then
+      d.first_clicked_at = firstI
+      d.clicked_at = firstI
+    else
+      d.first_clicked_at = nil
+      d.clicked_at = nil
+      uncount(d, KEYS[2], 'clicked')
+      if not isset(d.first_opened_at) and not isset(d.opened_at) then uncount(d, KEYS[2], 'opened') end
+    end
+    d.statut = computeStatut(d)
+  end
+
+  if reason == '' then
+    if not isset(d.first_clicked_at) then
+      if isset(d.clicked_at) then
+        d.first_clicked_at = d.clicked_at
+        redis.call('SET', KEYS[4], 'legacy')
       else
-        d[firstField] = at
-        d[field] = at
+        d.first_clicked_at = at
+        d.clicked_at = at
       end
     end
     -- un clic sans ouverture détectée (pixel bloqué) compte aussi comme ouverture
     count(d, KEYS[2], expireAt, 'opened')
-    if not o then count(d, KEYS[2], expireAt, 'clicked') end
-    promote(d, o and 'ouvert' or 'cliqué')
-    if redis.call('SET', lock, at, 'NX') then
-      if o then noteOpen = 1 else noteClick = 1 end
-    end
+    count(d, KEYS[2], expireAt, 'clicked')
+    promote(d, 'cliqué')
+    if redis.call('SET', KEYS[4], at, 'NX') then noteClick = 1 end
   end
+
+  redis.call('DEL', KEYS[5])
+  local from = math.max(#history - tonumber(ARGV[9]) + 1, 1)
+  for i = from, #history do redis.call('RPUSH', KEYS[5], cjson.encode(history[i])) end
+  redis.call('EXPIRE', KEYS[5], tonumber(ARGV[10]))
 end
 
 redis.call('SET', KEYS[1], encode(d))
-return {1, noteOpen, noteClick, d.statut}
+return {1, noteOpen, noteClick, d.statut, reason, reclassed}
 `
 
 // Migration d'une entrée vers v2 (idempotent : une entrée déjà en v2 est ignorée).
@@ -242,7 +329,7 @@ local exp = tonumber(ARGV[5])
 local opened = isset(d.first_opened_at) or isset(d.first_clicked_at)
 local r = RANK[d.statut] or 0
 count(d, KEYS[5], exp, 'sent')
-if isset(d.delivered_at) or opened or isset(d.first_auto_opened_at) or isset(d.first_auto_clicked_at)
+if isset(d.delivered_at) or opened or (tonumber(d.auto_click_count) or 0) > 0
    or (r >= 1 and r <= 3) or d.statut == 'plainte' or isset(d.complained_at) then
   count(d, KEYS[5], exp, 'delivered')
 end

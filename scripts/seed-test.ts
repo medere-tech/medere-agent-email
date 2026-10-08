@@ -2,11 +2,12 @@
  * Données de test pour l'Agent Mail DPC — base KV de TEST uniquement.
  *
  * Usage (Node ≥ 22.18, exécute le TypeScript sans dépendance) :
- *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names]
+ *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks]
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts webhook <type> <email_id> [--created-at=<iso>] [--message-id=<id>] [--svix-id=<suffixe>]
  *       type : delivered | bounced | complained | opened | clicked
- *       --created-at : date de l'événement (défaut : maintenant). Une ouverture ou un clic à moins
- *                      de 60 s de la livraison (à défaut de l'envoi) est classé automatique.
+ *       --created-at : date de l'événement (défaut : maintenant)
+ *       clicked : objet click (lien, heure, navigateur) ; --link=<url>, --click-at=<iso> (heure réelle
+ *                 du clic, sert aux rafales), --ua=<navigateur> (--ua= vide = robot), --no-click
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts clean
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts check-slack   refuse si une clé contient un Slack ID ≠ TEST_SLACK_USER_ID
  *
@@ -25,6 +26,7 @@
  *   email_track:test-legacy          format d'origine (statut "ouvert", opened_at, sans first_*)
  *   email_track:test-legacy-kaoufer  (--names) commercial « Kaoufer Guercif » → rattaché à kaoufer@medere.fr
  *   email_track:test-legacy-loane    (--names) commercial « Loane Deluge » → nom:loane-deluge (fiche justine.m@)
+ *   email_track:test-click-a|b|c     (--clicks) envois neufs pour les rafales de clics
  *   emails_index                     + les ids ci-dessus
  *   relance:test-seed-today          (--relance) relance du jour, rattachable à test-seed-envoye
  *   relance:test-seed-orphan         (--relance) relance sans envoi correspondant (reprise en legacy)
@@ -37,7 +39,8 @@ import { createHmac } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane']
+const CLICK_IDS = ['test-click-a', 'test-click-b', 'test-click-c']
+const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS]
 const RELANCE_KEYS = ['relance:test-seed-today', 'relance:test-seed-orphan']
 const SEED_COMMERCIAL_KEYS = ['nom:commercial-de-test', 'kaoufer@medere.fr', 'nom:loane-deluge']
 const WEBHOOK_PREFIX = 'msg_seedtest_'
@@ -104,7 +107,7 @@ async function scan(pattern: string): Promise<string[]> {
   return keys
 }
 
-async function seed(withRelance: boolean, withNames: boolean): Promise<void> {
+async function seed(withRelance: boolean, withNames: boolean, withClicks: boolean): Promise<void> {
   const contactId = required('TEST_HUBSPOT_CONTACT_ID')
   const psEmail = required('TEST_PS_EMAIL')
   const now = new Date()
@@ -147,6 +150,18 @@ async function seed(withRelance: boolean, withNames: boolean): Promise<void> {
     }
   }
 
+  if (withClicks) {
+    // Envois neufs (jamais ouverts ni cliqués), pour les scénarios de rafale de clics
+    for (const id of CLICK_IDS) {
+      await kv('SET', `email_track:${id}`, JSON.stringify({
+        ...base, sujet: `[TEST-SEED] clics ${id.slice(-1)}`, statut: 'envoyé',
+        sent_at: sentAt, opened_at: null, clicked_at: null,
+      }))
+      await kv('ZADD', 'emails_index', Date.parse(sentAt), id)
+      ids.push(id)
+    }
+  }
+
   const created = [...ids.map((id) => `email_track:${id}`), `emails_index (+${ids.length} membres)`]
 
   if (withRelance) {
@@ -183,12 +198,24 @@ async function webhook(kind: string, emailId: string, args: string[]): Promise<v
   const type = `email.${kind}`
   const createdAt = option(args, 'created-at') || new Date().toISOString()
   const messageId = option(args, 'message-id')
+  // Clic : objet click comme Resend (lien, heure réelle du clic, navigateur, IP fictive)
+  const click = kind === 'clicked' && !args.includes('--no-click')
+    ? {
+        click: {
+          ipAddress: '192.0.2.1',
+          link: option(args, 'link') ?? 'https://www.agencedpc.fr/professionnel/',
+          timestamp: option(args, 'click-at') || createdAt,
+          userAgent: option(args, 'ua') ?? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36',
+        },
+      }
+    : {}
   const payload = JSON.stringify({
     type,
     created_at: createdAt,
     data: {
       email_id: emailId, created_at: createdAt, to: [env.TEST_PS_EMAIL || ''], subject: 'test',
       ...(messageId ? { message_id: messageId } : {}),
+      ...click,
     },
   })
   // Signature Svix (format vérifié par resend.webhooks.verify) : HMAC-SHA256 de "id.timestamp.payload"
@@ -211,7 +238,7 @@ async function webhook(kind: string, emailId: string, args: string[]): Promise<v
 
 async function clean(): Promise<void> {
   const keys = [
-    ...SEED_IDS.flatMap((id) => [`email_track:${id}`, `email_body:${id}`, `hubspot_note:${id}:opened`, `hubspot_note:${id}:clicked`]),
+    ...SEED_IDS.flatMap((id) => [`email_track:${id}`, `email_body:${id}`, `email_clicks:${id}`, `hubspot_note:${id}:opened`, `hubspot_note:${id}:clicked`]),
     ...RELANCE_KEYS,
     ...(await scan(`webhook_event:${WEBHOOK_PREFIX}*`)),
   ]
@@ -262,7 +289,7 @@ async function checkSlack(): Promise<void> {
 async function main(): Promise<void> {
   assertTestKv()
   const [cmd = 'seed', ...args] = process.argv.slice(2)
-  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'))
+  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'), args.includes('--clicks'))
   if (cmd === 'webhook') return webhook(args[0], args[1], args.slice(2))
   if (cmd === 'clean') return clean()
   if (cmd === 'check-slack') return checkSlack()

@@ -22,7 +22,7 @@ export async function middleware(req: NextRequest) {
   const secret = process.env.NEXTAUTH_SECRET
   if (!secret) {
     console.error('[AUTH] NEXTAUTH_SECRET manquant — accès refusé à', pathname)
-    return NextResponse.json({ error: 'Configuration serveur invalide (NEXTAUTH_SECRET manquant)' }, { status: 500 })
+    return NextResponse.json({ error: 'Service momentanément indisponible. Préviens Déthié.' }, { status: 500 })
   }
 
   // Vérifier le cookie de session
