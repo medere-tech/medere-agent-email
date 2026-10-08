@@ -1,4 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { REDACTION_MODEL } from '@/lib/config'
+import { SMS_STEP, SMS_TIP, dpcStepsText } from '@/lib/dpc-steps'
 
 // Clé lue à chaque appel (comme le jeton HubSpot) : un changement de clé est pris en compte sans redémarrage
 let cached: { key: string; client: Anthropic } | null = null
@@ -61,13 +63,11 @@ ${sessionsText}
 OBJECTIF DU MAIL :
 Aider le PS à finaliser son inscription sur agencedpc.fr avec les étapes précises. Être chaleureux, concis, et rassurant.
 
-INSTRUCTIONS DPC À INCLURE :
-1. Se rendre sur www.agencedpc.fr/professionnel/
-2. Cliquer sur "S'identifier" (identifiant = adresse mail DPC, ou "mot de passe oublié" si besoin)
-3. Aller dans "Actions DPC" > "Rechercher une action/S'inscrire"
-4. Entrer le numéro de l'action DPC : ${formation.numero}
-5. Dans "Détail" > "Liste sessions", choisir la session souhaitée
-6. Cliquer sur "S'inscrire"
+INSTRUCTIONS DPC À INCLURE (les 7 étapes, toutes, dans cet ordre exact, numérotées de 1 à 7) :
+${dpcStepsText(formation.numero)}
+
+L'étape 3 (code reçu par SMS) est obligatoire et se reprend mot pour mot : « ${SMS_STEP} »
+Juste après les étapes, ajoute ce conseil en une phrase : « ${SMS_TIP} »
 
 RAPPEL CLÉ : Les formations sont intégralement prises en charge par l'ANDPC.
 
@@ -83,7 +83,7 @@ ${commercial.phone || ''}
 STYLE :
 - Ton professionnel mais humain, pas robotique
 - Phrase d'accroche qui rappelle l'appel du jour
-- Instructions DPC claires, numérotées
+- Instructions DPC claires, numérotées de 1 à 7 (parcours à jour avec le code SMS)
 - Une phrase sur la prise en charge ANDPC
 - Invitation à revenir vers le commercial
 - Signature complète
@@ -103,7 +103,7 @@ Le texte est en texte brut (pas de HTML, pas de Markdown), avec des retours à l
 // Rédaction du mail initial, transmise au fil de l'eau (morceaux de texte bruts)
 export async function* streamMail(params: GenerateMailParams): AsyncGenerator<string> {
   const stream = await anthropic().messages.create({
-    model: 'claude-opus-4-6',
+    model: REDACTION_MODEL,
     max_tokens: 1500,
     stream: true,
     messages: [{ role: 'user', content: buildMailPrompt(params) }],
@@ -130,6 +130,7 @@ export interface GenerateRelanceParams {
   commercial: { name: string; email: string; phone?: string }
   ps: { titre: string; nom: string }
   formationNom: string
+  formationNumero: string
   statut: 'non_ouvert' | 'ouvert_sans_clic' | 'clique'
   sentAt: string
   originalBody: string | null
@@ -137,7 +138,7 @@ export interface GenerateRelanceParams {
 
 // Relance d'un mail déjà envoyé : courte, adaptée au statut, suivie du rappel du mail d'origine.
 export async function generateRelance(params: GenerateRelanceParams): Promise<string> {
-  const { commercial, ps, formationNom, statut, sentAt, originalBody } = params
+  const { commercial, ps, formationNom, formationNumero, statut, sentAt, originalBody } = params
   const situation = {
     non_ouvert: "Le PS n'a pas ouvert le premier mail : rappeler brièvement l'essentiel et donner envie de l'ouvrir.",
     ouvert_sans_clic: "Le PS a ouvert le premier mail mais n'a cliqué sur aucun lien : proposer de l'aide pour l'inscription (par téléphone) et lever les freins.",
@@ -145,14 +146,22 @@ export async function generateRelance(params: GenerateRelanceParams): Promise<st
   }[statut]
 
   const prompt = `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.
-Rédige une RELANCE courte (5 à 8 lignes avant la signature) pour un professionnel de santé qui a reçu un premier mail.
+Rédige une RELANCE courte pour un professionnel de santé qui a reçu un premier mail : 3 à 5 lignes d'introduction, puis le parcours d'inscription à jour, puis la signature.
 
 CONTEXTE :
 - Commercial : ${commercial.name} (${commercial.email})
 - PS : ${ps.titre} ${ps.nom}
 - Formation : "${formationNom}"
+- Numéro d'action DPC : ${formationNumero || 'inconnu'}
 - Premier mail envoyé le : ${sentAt.slice(0, 10)}
 - Situation : ${situation}
+
+PARCOURS D'INSCRIPTION À JOUR (obligatoire dans la relance, avant la signature, les 7 étapes dans cet ordre exact, numérotées de 1 à 7) :
+${dpcStepsText(formationNumero)}
+
+L'étape 3 (code reçu par SMS) se reprend mot pour mot : « ${SMS_STEP} »
+Juste après les étapes, ajoute ce conseil en une phrase : « ${SMS_TIP} »
+Depuis le 15 septembre 2026, l'ANDPC impose ce code SMS : même si le premier mail recopié plus bas présente un ancien parcours (6 étapes, sans code SMS), la relance présente TOUJOURS ce parcours à jour en 7 étapes. Ne recopie jamais les étapes du premier mail dans le texte de la relance.
 
 STYLE :
 - Commence par "Bonjour ${ps.titre} ${ps.nom}," (ou "Bonjour," si le nom manque)
@@ -167,7 +176,7 @@ ${originalBody ? `Après la signature, ajoute exactement la ligne "----- Mon pr�
 Réponds UNIQUEMENT avec le texte complet de la relance.`
 
   const msg = await anthropic().messages.create({
-    model: 'claude-opus-4-6',
+    model: REDACTION_MODEL,
     max_tokens: 2500,
     messages: [{ role: 'user', content: prompt }],
   })

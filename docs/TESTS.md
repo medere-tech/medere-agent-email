@@ -259,6 +259,17 @@ Contrôles par lecture de la page (DOM). Données : `seed --historique` (contact
 | M8 | Fenêtre de relance : ajouter « https:/medere.fr » | avertissement « Adresse mal écrite » |
 | M9 | Performance (production locale) | voir le rapport du lot 5 |
 
+### O. Parcours d'inscription en 7 étapes (code SMS), modèle unique, emails hors des adresses
+
+| # | Étapes | Attendu |
+|---|---|---|
+| O1 | Rédaction réelle, classe virtuelle (aucun envoi) | étapes 1 à 7 dans l'ordre, pas d'étape 8 ; étape 3 = phrase SMS mot pour mot ; conseil sur le numéro de mobile ; numéro DPC à l'étape 5 |
+| O2 | Rédaction réelle, e-learning (aucun envoi) | idem |
+| O3 | Relance d'un mail dont le corps d'origine contient l'ancien parcours en 6 étapes : brouillon (`GET /api/relance`) et rédaction (`POST /api/relance/generate`) | au-dessus de « Mon précédent message » : les 7 étapes à jour + conseil ; le mail d'origine recopié reste tel quel |
+| O4 | `grep` des identifiants de modèle dans `app`, `lib`, `components` | uniquement `REDACTION_MODEL` dans `lib/config.ts` |
+| O5 | `GET /api/contact-search` et `GET /api/contact-history` | 405 ; en POST, résultats normaux ; aucune adresse `/api/…` contenant un email pendant le parcours |
+| O6 | Révocation : fiche `recubd9fXVX2rkhfB` → « Plus actif » puis « Actif » (connecteur Airtable), `/api/me` toutes les 2 s | 403 puis 200 dans le délai documenté (README, « Délai maximal de révocation ») ; aucune requête au-delà de 300 ms ; fiche relue « Actif » |
+
 ### N. Instantané (données Airtable jamais attendues)
 
 | # | Étapes | Attendu |

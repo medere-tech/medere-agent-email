@@ -19,13 +19,16 @@ const STATUT_LABEL: Record<string, string> = {
 
 // « Déjà contacté » : envois (mails et relances) au même contact HubSpot sur les
 // CONTACT_HISTORY_DAYS derniers jours, tous commerciaux confondus, du plus récent au plus ancien.
-export async function GET(req: NextRequest) {
+// POST (corps JSON { contactId, email, rpps }) : l'email du PS n'apparaît jamais dans l'adresse
+// de la requête, donc jamais dans les journaux d'accès (Vercel).
+export async function POST(req: NextRequest) {
   const guard = await requireActor()
   if (!guard.ok) return guard.response
-  const contactId = req.nextUrl.searchParams.get('contactId') || ''
+  const body = await req.json().catch(() => ({}))
+  const contactId = String(body?.contactId || '')
   // Le contact vient d'être choisi : on pré-calcule ses formations déjà suivies (formations proposées
   // en fin de mail), sans attendre, pour que la rédaction démarre sans requête Airtable
-  prefetchFormationsDejaFaites(req.nextUrl.searchParams.get('rpps') || '', req.nextUrl.searchParams.get('email') || '')
+  prefetchFormationsDejaFaites(String(body?.rpps || ''), String(body?.email || ''))
   if (!/^\d{1,20}$/.test(contactId) || !kvConfigured()) {
     return NextResponse.json({ jours: CONTACT_HISTORY_DAYS, envois: [] }, { headers: { 'Cache-Control': 'no-store' } })
   }

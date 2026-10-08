@@ -21,9 +21,10 @@ Créé par [Déthié](https://dethie.fr/blog/) · Copyright © 2026 Médéré ·
 11. [Webhooks Resend](#webhooks-resend)
 12. [HubSpot — Logging des emails](#hubspot--logging-des-emails)
 13. [Déploiement](#déploiement)
-14. [Tests](#tests)
-15. [Maintenance](#maintenance)
-16. [Résolution de problèmes fréquents](#résolution-de-problèmes-fréquents)
+14. [Modèle de rédaction](#modèle-de-rédaction)
+15. [Tests](#tests)
+16. [Maintenance](#maintenance)
+17. [Résolution de problèmes fréquents](#résolution-de-problèmes-fréquents)
 
 ---
 
@@ -181,10 +182,11 @@ Sessions filtrées par :
 **Étape 4 — Contact PS**
 Recherche dans HubSpot par nom, prénom, email ou RPPS. Sélection du titre de politesse (Docteur / Madame / Monsieur).
 Si HubSpot ne répond pas, l'app affiche « HubSpot indisponible, ne crée pas le contact » (et non « Aucun contact trouvé »), pour éviter de créer des doublons.
-**Alerte « déjà contacté »** : dès qu'un contact est choisi, `/api/contact-history` lit `idx:contact:{id}` et liste les envois à ce contact des **14 derniers jours** (`CONTACT_HISTORY_DAYS`), tous commerciaux confondus : mail ou relance, qui, quand, quelle formation, quel statut (Envoyé, Reçu, Ouvert, Cliqué, Adresse invalide, Indésirable). Non bloquante. Si la vérification échoue, un message invite à consulter le suivi.
+**Alerte « déjà contacté »** : dès qu'un contact est choisi, `POST /api/contact-history` (corps `{ contactId, email, rpps }`) lit `idx:contact:{id}` et liste les envois à ce contact des **14 derniers jours** (`CONTACT_HISTORY_DAYS`), tous commerciaux confondus : mail ou relance, qui, quand, quelle formation, quel statut (Envoyé, Reçu, Ouvert, Cliqué, Adresse invalide, Indésirable). Non bloquante. Si la vérification échoue, un message invite à consulter le suivi.
 
 **Étape 5 — Aperçu**
 - **Rédaction au fil de l'eau** : l'étape 5 s'ouvre dès que le serveur répond (contrôles d'identité et de débit seulement ; les formations proposées sont calculées ensuite, dans le flux) ; l'objet puis le texte s'écrivent progressivement pendant que Claude rédige (`/api/generate` répond en NDJSON : `start`, `delta`, `done` ou `error` ; format demandé à Claude : « Objet : … », ligne vide, texte — lu par `lib/generated-mail.ts`). Pendant la rédaction, les champs sont en lecture seule et l'envoi désactivé ; « Retour » annule la rédaction (le serveur arrête Claude). En cas d'échec, retour à l'étape 4 avec « La rédaction du mail a échoué. Réessaie. ».
+- **Parcours d'inscription en 7 étapes** (`lib/dpc-steps.ts`, source unique pour le mail, la relance rédigée et le brouillon de relance). Depuis le 15 septembre 2026, l'ANDPC impose l'authentification forte : l'étape 3, entre « S'identifier » et « Actions DPC », est reprise mot pour mot — « Saisissez le code de sécurité reçu par SMS sur votre téléphone mobile (authentification forte exigée par l'ANDPC depuis le 15 septembre 2026). » —, suivie du conseil de vérifier son numéro de mobile dans l'espace personnel agencedpc.fr. Pour modifier le parcours, changer seulement `lib/dpc-steps.ts`.
 - **Onglets « Texte » / « Aperçu »** : l'aperçu affiche le mail **tel qu'il sera reçu** (De, À, Objet, puis le HTML produit par la même fonction `renderMail` que l'envoi, avec l'apparence par défaut d'une messagerie). Un clic sur un lien de l'aperçu l'ouvre dans un nouvel onglet.
 - **Avertissements sur les liens** (`linkWarnings`, `lib/render-mail.ts`), non bloquants, aussi dans la fenêtre de relance : lien sans texte ou sans adresse, espace dans l'adresse, adresse ne commençant ni par `https://` ni par `www.`, parenthèse manquante, texte entre crochets sans adresse (« [Lien d'inscription] »), protocole mal écrit (`htps://`, `https:/`, `https//`), extension de site manquante (`www.agencedpc/…`).
 
@@ -247,6 +249,7 @@ Le rôle est déterminé **côté serveur** à chaque requête, à partir de l'e
 - Fiches Commerciaux **en mémoire, jamais attendues** : chaque requête utilise la dernière version connue des fiches (mémoire de l'instance, sinon KV `cache:airtable:fiches:v1`, conservé après un redémarrage) ; dès qu'elle a plus de 60 secondes (`COMMERCIAL_CACHE_SECONDS`), elle est relue dans Airtable **en arrière-plan** (environ 1 s), sans faire attendre la requête. Sur un serveur qui tourne en continu, la relecture a aussi lieu chaque minute (`instrumentation.ts`).
 - **Délai maximal de révocation** (passage à « Plus actif », et de même pour un retour à « Actif » ou un changement d'email) :
   - **app utilisée** (au moins une requête par minute, ou serveur qui tourne en continu) : **60 secondes + environ 1 seconde** de relecture Airtable ;
+    mesuré le 8 octobre 2026 (production locale, une requête toutes les 2 s) : blocage 27 s après le passage à « Plus actif », accès rétabli 27 s après le retour à « Actif », aucune requête ralentie ;
   - **app inutilisée depuis plus de 60 secondes** (instance Vercel en sommeil) : la **première requête** qui suit est encore traitée avec l'ancienne fiche — c'est elle qui déclenche la relecture —, toutes les suivantes utilisent la fiche à jour. Une personne révoquée peut donc passer **une requête de plus** (un affichage, ou au pire un envoi) si personne n'a utilisé l'app dans la minute précédente.
   - Pour un blocage immédiat et certain (départ, compte compromis) : passer la fiche en « Plus actif » **et** changer `NEXTAUTH_SECRET` sur Vercel et redéployer (toutes les sessions sont invalidées, voir « Authentification »).
 - Plusieurs fiches avec le même email : la fiche « Actif » est retenue.
@@ -296,7 +299,7 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 - **Objectif de réactivité** : aucune action ne fait attendre le commercial plus de 300 ms, sauf la rédaction du mail elle-même et la recherche de contact (temps de réponse de HubSpot, 300 à 600 ms). Mesures : voir le rapport du lot « instantané ».
 - La recherche Clients (une page) garde le cache Next de 60 s.
 - Le cron lit toujours Airtable sans cache (inscriptions et correspondance session → formation à jour).
-- Recherche de contact HubSpot **progressive** : la première passe (la plus pertinente : email, RPPS ou recherche texte, `?part=first`) et les passes complémentaires (`?part=rest` : texte sans accents, prénom + nom, mots séparés, en parallèle) partent en même temps ; la première liste s'affiche dès son arrivée, les contacts supplémentaires sont **ajoutés à la suite** (aucun réordonnancement, la sélection en cours n'est pas touchée). « Aucun contact trouvé » n'apparaît qu'une fois toutes les passes terminées. Une réponse 429 de HubSpot est retentée jusqu'à 2 fois.
+- Recherche de contact HubSpot **progressive** (`POST /api/contact-search`, corps `{ q, part }`) : la première passe (la plus pertinente : email, RPPS ou recherche texte, `part: 'first'`) et les passes complémentaires (`part: 'rest'` : texte sans accents, prénom + nom, mots séparés, en parallèle) partent en même temps ; la première liste s'affiche dès son arrivée, les contacts supplémentaires sont **ajoutés à la suite** (aucun réordonnancement, la sélection en cours n'est pas touchée). « Aucun contact trouvé » n'apparaît qu'une fois toutes les passes terminées. Une réponse 429 de HubSpot est retentée jusqu'à 2 fois.
 
 ### Champs Airtable utilisés — Sessions
 
@@ -607,6 +610,23 @@ Vercel déploie automatiquement dès le push sur `main`.
 ```
 https://medere-agent-email-dpc.vercel.app
 ```
+
+---
+
+## Modèle de rédaction
+
+Le modèle utilisé pour toutes les rédactions (mail initial et relance) est défini à un seul endroit : `REDACTION_MODEL` dans `lib/config.ts` (actuellement `claude-opus-4-6`).
+
+**Changer de modèle** : modifier `REDACTION_MODEL` (identifiant exact du modèle Anthropic), `npm run build`, tester une rédaction de mail et une rédaction de relance (`docs/TESTS.md`, sections M et L-bis), puis déployer. Aucun autre fichier à modifier.
+
+**Relancer la comparaison des modèles** (`docs/comparaison-modeles.md`, comparaison du 8 octobre 2026) :
+1. en local, avec la fiche et le contact de test, **sans envoyer de mail** ;
+2. pour chaque modèle candidat et chaque cas (formations différentes, e-learning et classe virtuelle, avec et sans formations proposées), envoyer le prompt de production (`buildMailPrompt`, `lib/claude.ts`) en streaming, avec `max_tokens` 1500, et noter le délai avant le premier mot, la durée totale et les jetons (`usage`) ;
+3. coût par mail = jetons d'entrée × tarif d'entrée + jetons de sortie × tarif de sortie (tarifs publics Anthropic par million de jetons) ;
+4. contrôler le respect des consignes : 7 étapes d'inscription dans l'ordre (dont le code SMS), numéro DPC, dates et numéros des sessions, formations proposées avec leur lien (aucun lien inventé), signature complète, mention ANDPC, pas de tiret long ;
+5. reporter les mails côte à côte dans `docs/comparaison-modeles.md` pour juger la qualité.
+
+La comparaison du 8 octobre 2026 a utilisé une route temporaire de développement (supprimée ensuite, jamais livrée) : elle reconstruisait les cas avec les mêmes fonctions qu'en production (`getFormationsActives`, `getSessionsByFormation`, `getFormationsDejaFaites`, `getFormationsUpsell`) et écrivait chaque résultat dans un fichier local.
 
 ---
 

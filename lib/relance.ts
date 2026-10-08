@@ -3,6 +3,7 @@ import { getKv } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 import { STATUT_ACTIF, normalizeEmail, type Fiche } from '@/lib/roles'
 import type { Actor } from '@/lib/identity'
+import { SMS_TIP, dpcStepsText } from '@/lib/dpc-steps'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
 
@@ -110,7 +111,8 @@ export function relanceSubject(entry: Record<string, any>): string {
   return `Relance : votre formation ${String(entry.formation_nom || '').trim()}`
 }
 
-// Brouillon de relance : formule d'appel, introduction adaptée au statut, rappel du mail d'origine
+// Brouillon de relance : formule d'appel, introduction adaptée au statut, parcours d'inscription à jour
+// (7 étapes avec le code SMS, quel que soit le contenu du mail d'origine), rappel du mail d'origine
 export function relanceDraft(entry: Record<string, any>, body: string | null, senderName: string): string {
   const titre = String(entry.ps_titre || '').trim()
   const nom = String(entry.ps_lastname || '').trim()
@@ -118,11 +120,16 @@ export function relanceDraft(entry: Record<string, any>, body: string | null, se
   const formation = String(entry.formation_nom || '').trim()
   const date = frenchDate(entry.sent_at)
   const intro: Record<RelanceStatus, string> = {
-    non_ouvert: `Je me permets de revenir vers vous au sujet de la formation « ${formation} », dont je vous ai transmis les informations${date ? ` le ${date}` : ''}. Vous trouverez ci-dessous les étapes pour finaliser votre inscription, intégralement prise en charge par l'ANDPC.`,
+    non_ouvert: `Je me permets de revenir vers vous au sujet de la formation « ${formation} », dont je vous ai transmis les informations${date ? ` le ${date}` : ''}. Votre inscription est intégralement prise en charge par l'ANDPC.`,
     ouvert_sans_clic: `Je reviens vers vous suite à mon message${date ? ` du ${date}` : ''} concernant la formation « ${formation} ». Avez-vous pu avancer sur votre inscription ? Si une étape vous pose difficulté, je peux vous guider par téléphone.`,
     clique: `Je reviens vers vous suite à mon message${date ? ` du ${date}` : ''} concernant la formation « ${formation} ». Si votre inscription n'est pas encore finalisée, je reste à votre disposition pour vous accompagner.`,
   }
-  const parts = [greeting, '', intro[relanceStatus(entry)], '', 'Bien cordialement,', senderName]
+  const parts = [
+    greeting, '', intro[relanceStatus(entry)], '',
+    "Voici les étapes d'inscription à jour (l'ANDPC demande désormais un code reçu par SMS) :",
+    dpcStepsText(String(entry.formation_numero || '')), '', SMS_TIP, '',
+    'Bien cordialement,', senderName,
+  ]
   if (body) parts.push('', '----- Mon précédent message -----', '', body.trim())
   return parts.join('\n')
 }

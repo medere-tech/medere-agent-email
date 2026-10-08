@@ -59,6 +59,7 @@ export async function POST(req: NextRequest) {
         commercial: { name: sender.name, email: sender.email, phone: sender.phone },
         ps: { titre: entry.ps_titre || '', nom: entry.ps_lastname || '' },
         formationNom: entry.formation_nom || '',
+        formationNumero: entry.formation_numero || '',
         statut: relanceStatus(entry),
         sentAt: entry.sent_at || '',
         originalBody: await originalBody(id),

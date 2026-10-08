@@ -339,7 +339,9 @@ export default function AgentMail() {
     if (contactSearch.length < 2) { setContactResults([]); return }
     const t = setTimeout(() => {
       const id = ++searchIdRef.current
-      const q = encodeURIComponent(contactSearch)
+      const search = (part: 'first' | 'rest') => fetchJson('/api/contact-search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q: contactSearch, part }),
+      })
       setContactSearching(true)
       setContactResults([])
       let firstDone = false
@@ -347,7 +349,7 @@ export default function AgentMail() {
       let pendingRest: HSContact[] | null = null
       const append = (list: HSContact[]) =>
         setContactResults((prev) => [...prev, ...list.filter((c) => !prev.some((p) => p.id === c.id))])
-      const first = fetchJson(`/api/contact-search?q=${q}&part=first`)
+      const first = search('first')
         .then((d) => {
           if (id !== searchIdRef.current) return
           firstDone = true
@@ -355,7 +357,7 @@ export default function AgentMail() {
           if (pendingRest) append(pendingRest)
         })
         .catch(() => { firstDone = true; firstFailed = true; if (pendingRest && id === searchIdRef.current) append(pendingRest) })
-      const rest = fetchJson(`/api/contact-search?q=${q}&part=rest`)
+      const rest = search('rest')
         .then((d) => {
           if (id !== searchIdRef.current) return
           if (firstDone) append(d.contacts || [])
@@ -376,8 +378,11 @@ export default function AgentMail() {
     if (!psContact) { setHistory(null); return }
     let alive = true
     const contactId = psContact.id
-    const qs = new URLSearchParams({ contactId, email: psContact.email || '', rpps: psContact.rpps || '' })
-    fetchJson(`/api/contact-history?${qs}`)
+    // POST : l'email du PS ne passe jamais dans l'adresse de la requête
+    fetchJson('/api/contact-history', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactId, email: psContact.email || '', rpps: psContact.rpps || '' }),
+    })
       .then((d) => { if (alive) setHistory({ contactId, jours: d.jours || 14, envois: d.envois || [], failed: false }) })
       .catch(() => { if (alive) setHistory({ contactId, jours: 14, envois: [], failed: true }) })
     return () => { alive = false }
