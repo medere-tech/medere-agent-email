@@ -1,20 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getKv, kvConfigured } from '@/lib/kv'
+import { KEYS } from '@/lib/kv-schema'
+import { isMigrated, parisDay, statsFromCounters, statsFromEntries, type Stats } from '@/lib/tracking'
+
+// Lecture du KV à chaque appel : jamais de rendu statique au build, jamais de réponse
+// gardée en cache par le navigateur (sinon "Actualiser" peut réafficher d'anciens chiffres)
+export const dynamic = 'force-dynamic'
+const NO_STORE = { 'Cache-Control': 'no-store' }
 
 export async function GET(req: NextRequest) {
   try {
-    if (!process.env.KV_REST_API_URL) {
+    if (!kvConfigured()) {
       return NextResponse.json({ error: 'KV non configuré' }, { status: 500 })
     }
 
-    const { kv } = await import('@vercel/kv')
+    const kv = getKv()
     const { searchParams } = new URL(req.url)
     const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
     const limit = 20
 
-    // Récupérer TOUS les IDs pour les stats (sorted set complet)
-    const allIds = await kv.zrange('emails_index', 0, -1, { rev: true }) as string[]
-    const total = allIds.length
-
+    const total = await kv.zcard(KEYS.emailsIndex)
     if (total === 0) {
       return NextResponse.json({
         emails: [],
@@ -22,55 +27,37 @@ export async function GET(req: NextRequest) {
         page: 1,
         pages: 0,
         stats: { total: 0, ouverts: 0, cliques: 0 },
-      })
+      }, { headers: NO_STORE })
     }
 
-    // Stats calculées sur TOUS les emails de l'index, pas un sous-ensemble arbitraire
-    const allStatuts = await Promise.all(
-      allIds.map(async (id) => {
-        try {
-          const d = await kv.get(`email_track:${id}`) as Record<string, any> | null
-          return d?.statut ?? null
-        } catch {
-          return null
-        }
-      })
-    )
+    // Stats depuis le premier envoi : somme des compteurs journaliers une fois la base
+    // migrée (scripts/migrate-kv.ts) ; avant, calculées sur les entrées elles-mêmes.
+    let counts: Stats
+    if (await isMigrated()) {
+      const first = (await kv.zrange(KEYS.emailsIndex, 0, 0, { withScores: true })) as (string | number)[]
+      const fromDay = parisDay(Number(first[1]))
+      counts = await statsFromCounters(fromDay, parisDay())
+    } else {
+      const allIds = (await kv.zrange(KEYS.emailsIndex, 0, -1)) as string[]
+      counts = statsFromEntries(await mgetEntries(allIds))
+    }
 
     const stats = {
-      total: allStatuts.filter(Boolean).length,
-      ouverts: allStatuts.filter((s) => s === 'ouvert' || s === 'cliqué').length,
-      cliques: allStatuts.filter((s) => s === 'cliqué').length,
-    }
-
-    // Pagination sur les IDs
-    const start = (page - 1) * limit
-    const pageIds = allIds.slice(start, start + limit)
-
-    if (!pageIds.length) {
-      return NextResponse.json({
-        emails: [],
-        total,
-        page,
-        pages: Math.ceil(total / limit),
-        stats,
-      })
+      total: counts.sent,
+      ouverts: counts.opened,
+      cliques: counts.clicked,
+      delivres: counts.delivered,
+      bounces: counts.bounced,
+      plaintes: counts.complained,
     }
 
     // Données complètes pour la page courante uniquement
-    const pageResults = await Promise.all(
-      pageIds.map(async (id) => {
-        try {
-          const data = await kv.get(`email_track:${id}`) as Record<string, any> | null
-          if (!data) return null
-          return { resend_id: id, ...data }
-        } catch {
-          return null
-        }
-      })
-    )
-
-    const emails = pageResults.filter(Boolean)
+    const start = (page - 1) * limit
+    const pageIds = (await kv.zrange(KEYS.emailsIndex, start, start + limit - 1, { rev: true })) as string[]
+    const pageEntries = await mgetEntries(pageIds, true)
+    const emails = pageIds
+      .map((id, i) => (pageEntries[i] ? { resend_id: id, ...pageEntries[i] } : null))
+      .filter(Boolean)
 
     return NextResponse.json({
       emails,
@@ -78,9 +65,20 @@ export async function GET(req: NextRequest) {
       page,
       pages: Math.ceil(total / limit),
       stats,
-    })
+    }, { headers: NO_STORE })
   } catch (e: any) {
     console.error('[SUIVI] Erreur:', e.message)
     return NextResponse.json({ error: e.message }, { status: 500 })
   }
+}
+
+// MGET par paquets de 500 ; keepNulls garde l'alignement avec la liste d'ids
+async function mgetEntries(ids: string[], keepNulls = false): Promise<Record<string, any>[]> {
+  const kv = getKv()
+  const out: (Record<string, any> | null)[] = []
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500)
+    out.push(...(await kv.mget<(Record<string, any> | null)[]>(...chunk.map((id) => KEYS.track(id)))))
+  }
+  return (keepNulls ? out : out.filter(Boolean)) as Record<string, any>[]
 }

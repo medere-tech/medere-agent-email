@@ -34,3 +34,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# sauvegardes KV (scripts/migrate-kv.ts --export) : données personnelles
+/backups

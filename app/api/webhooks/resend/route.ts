@@ -1,65 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
+import { getKv } from '@/lib/kv'
+import { applyEvent, type TrackingEvent } from '@/lib/tracking'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
 
-// Mise à jour atomique de email_track:{id} (lecture + écriture dans Redis, sans
-// course entre un "opened" et un "clicked" simultanés). Le format JSON existant
-// est conservé, /suivi le lit sans changement.
-//   - statut monotone : envoyé < ouvert < cliqué, jamais de régression
-//   - first_opened_at / first_clicked_at écrits une seule fois
-//   - opened_at / clicked_at (affichés par /suivi) figés sur la première occurrence
-//   - entrée antérieure déjà ouverte/cliquée : first_* repris de opened_at/clicked_at
-//     et verrou de Note posé (l'ancien webhook a déjà créé la Note HubSpot)
-// KEYS[1] = email_track:{id}, KEYS[2] = hubspot_note:{id}:{kind}
-// ARGV[1] = 'opened' | 'clicked', ARGV[2] = date ISO
-// Retour : 1 si l'email est suivi, 0 sinon
-const UPDATE_TRACKING_SCRIPT = `
-local raw = redis.call('GET', KEYS[1])
-if not raw then return 0 end
-local d = cjson.decode(raw)
-
-local function isset(v) return v ~= nil and v ~= cjson.null and v ~= '' end
-
-local firstField, field, target
-if ARGV[1] == 'opened' then
-  firstField, field, target = 'first_opened_at', 'opened_at', 'ouvert'
-else
-  firstField, field, target = 'first_clicked_at', 'clicked_at', 'cliqué'
-end
-
-if not isset(d[firstField]) then
-  if isset(d[field]) then
-    d[firstField] = d[field]
-    redis.call('SET', KEYS[2], 'legacy')
-  else
-    d[firstField] = ARGV[2]
-    d[field] = ARGV[2]
-  end
-end
-
-local rank = { ['envoyé'] = 0, ['ouvert'] = 1, ['cliqué'] = 2 }
-if rank[target] > (rank[d.statut] or 0) then d.statut = target end
-
--- Sur Upstash, cjson décode null en nil et cjson.null vaut nil : une clé à null
--- disparaîtrait à la réécriture. On la rajoute dans la chaîne JSON encodée.
-local json = cjson.encode(d)
-local nulls = {}
-if d.opened_at == nil then table.insert(nulls, '"opened_at":null') end
-if d.clicked_at == nil then table.insert(nulls, '"clicked_at":null') end
-if #nulls > 0 then
-  if json == '{}' then
-    json = '{' .. table.concat(nulls, ',') .. '}'
-  else
-    json = string.sub(json, 1, -2) .. ',' .. table.concat(nulls, ',') .. '}'
-  end
-end
-
-redis.call('SET', KEYS[1], json)
-return 1
-`
-
 const DEDUP_TTL = 60 * 60 * 24 * 7 // Resend rejoue un webhook pendant quelques jours au maximum
+
+// Événements Resend traités → fait enregistré sur l'envoi (voir EVENT_SCRIPT dans lib/kv-schema.ts)
+const EVENTS: Record<string, TrackingEvent> = {
+  'email.delivered': 'delivered',
+  'email.bounced': 'bounced',
+  'email.complained': 'complained',
+  'email.opened': 'opened',
+  'email.clicked': 'clicked',
+}
 
 export async function POST(req: NextRequest) {
   // 1. Vérification de signature : seul cas qui renvoie une erreur à Resend
@@ -97,13 +52,13 @@ async function handleEvent(event: ReturnType<typeof resend.webhooks.verify>, svi
   const data = event.data as any
   console.log('[WEBHOOK] Event reçu:', event.type, data?.email_id)
 
-  // Uniquement email.opened et email.clicked
-  if (event.type !== 'email.opened' && event.type !== 'email.clicked') return
+  const kind = EVENTS[event.type]
+  if (!kind) return
 
   const emailId = data?.email_id
   if (!emailId) return
 
-  const { kv } = await import('@vercel/kv')
+  const kv = getKv()
 
   // Dédoublonnage : un même événement (même svix-id) n'est traité qu'une fois
   if (svixId) {
@@ -114,35 +69,31 @@ async function handleEvent(event: ReturnType<typeof resend.webhooks.verify>, svi
     }
   }
 
-  const kind = event.type === 'email.opened' ? 'opened' : 'clicked'
-  const trackKey = `email_track:${emailId}`
-  const noteKey = `hubspot_note:${emailId}:${kind}`
+  // Date de l'événement chez Resend (et non de réception) : un rejeu tardif ne fausse
+  // ni la détection des événements automatiques ni les dates affichées.
+  const createdAt = new Date((event as any).created_at || '')
+  const eventAt = Number.isFinite(createdAt.getTime()) ? createdAt : new Date()
 
-  const tracked = await kv.eval<[string, string], number>(
-    UPDATE_TRACKING_SCRIPT,
-    [trackKey, noteKey],
-    [kind, new Date().toISOString()]
-  )
+  const result = await applyEvent(emailId, kind, eventAt, typeof data?.message_id === 'string' ? data.message_id : '')
 
-  if (!tracked) {
+  if (!result.tracked) {
     // Inclut les copies envoyées au commercial (jamais enregistrées dans le KV)
     console.log('[WEBHOOK] email_id non trouvé dans KV:', emailId)
     return
   }
-  console.log('[WEBHOOK] Statut KV mis à jour:', emailId, kind)
+  console.log('[WEBHOOK] Statut KV mis à jour:', emailId, kind, result.automatic ? '(automatique)' : '', '→', result.statut)
 
-  // Une seule Note HubSpot par type d'événement et par email
-  const noteLock = await kv.set(noteKey, new Date().toISOString(), { nx: true })
-  if (noteLock === null) return
+  // Une seule Note HubSpot par type (première ouverture, premier clic), jamais pour
+  // un événement automatique ; le verrou est posé atomiquement par le script.
+  const noteKind = result.createOpenNote ? 'opened' : result.createClickNote ? 'clicked' : null
+  if (!noteKind || !result.entry) return
 
-  const entry = await kv.get<Record<string, any>>(trackKey)
-  if (!entry) return
-
-  const emoji = kind === 'opened' ? '👁️' : '🖱️'
-  const action = kind === 'opened' ? 'ouvert' : 'cliqué'
+  const entry = result.entry
+  const emoji = noteKind === 'opened' ? '👁️' : '🖱️'
+  const action = noteKind === 'opened' ? 'ouvert' : 'cliqué'
   const date = new Intl.DateTimeFormat('fr-FR', {
-    day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit'
-  }).format(new Date())
+    day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris',
+  }).format(eventAt)
 
   try {
     await logNoteHubSpot(
@@ -152,7 +103,7 @@ async function handleEvent(event: ReturnType<typeof resend.webhooks.verify>, svi
     console.log('[WEBHOOK] Note HubSpot créée pour contact:', entry.contact_id)
   } catch (e) {
     // Libère le verrou : le prochain événement du même type pourra recréer la Note
-    await kv.del(noteKey)
+    await kv.del(`hubspot_note:${emailId}:${noteKind}`)
     throw e
   }
 }

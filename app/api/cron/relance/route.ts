@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { isPsInscritAFormation } from '@/lib/airtable'
+import { getKv, kvConfigured } from '@/lib/kv'
+import { purgeExpired } from '@/lib/tracking'
+import { RETENTION_DAYS } from '@/lib/config'
 
 export async function GET(req: NextRequest) {
   // Verify cron secret. Sans CRON_SECRET, la valeur attendue deviendrait
@@ -15,15 +18,16 @@ export async function GET(req: NextRequest) {
 
   const today = new Date().toISOString().split('T')[0]
   let notified = 0
+  let purged = 0
   let errors: string[] = []
 
   try {
-    if (!process.env.KV_REST_API_URL) {
+    if (!kvConfigured()) {
       return NextResponse.json({ message: 'KV non configuré — relances désactivées' })
     }
 
-    const { kv } = await import('@vercel/kv')
-    
+    const kv = getKv()
+
     // Scan all relance keys
     const keys = await kv.keys('relance:*')
 
@@ -65,7 +69,16 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: e.message }, { status: 500 })
   }
 
-  return NextResponse.json({ date: today, notified, errors })
+  // Rétention RGPD : purge des envois de plus de RETENTION_DAYS jours (indépendante des relances)
+  try {
+    purged = await purgeExpired()
+    if (purged) console.log(`[CRON] Purge RGPD : ${purged} envoi(s) de plus de ${RETENTION_DAYS} jours supprimé(s)`)
+  } catch (e: any) {
+    console.error('[CRON] Purge RGPD en échec:', e.message)
+    errors.push(`purge RGPD: ${e.message}`)
+  }
+
+  return NextResponse.json({ date: today, notified, purged, errors })
 }
 
 function buildSlackMessage(item: any): string {

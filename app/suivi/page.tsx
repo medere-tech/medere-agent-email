@@ -11,7 +11,7 @@ interface EmailEntry {
   commercial_name: string
   formation_nom: string
   sujet: string
-  statut: 'envoyé' | 'ouvert' | 'cliqué'
+  statut: 'envoyé' | 'délivré' | 'ouvert' | 'cliqué' | 'bounce' | 'plainte'
   sent_at: string
   opened_at: string | null
   clicked_at: string | null
@@ -94,6 +94,17 @@ const Icons = {
       <path d="M4 6L8 10L12 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
     </svg>
   ),
+  Delivered: () => (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path d="M2 8.5L5 11.5L10 5.5M8 11.5L14 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  ),
+  Alert: () => (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path d="M8 2L14.5 13.5H1.5L8 2Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"/>
+      <path d="M8 7V9.5M8 11.5V12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+    </svg>
+  ),
   Logout: () => (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
       <path d="M6 2.5H3.5C2.95 2.5 2.5 2.95 2.5 3.5V12.5C2.5 13.05 2.95 13.5 3.5 13.5H6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -106,8 +117,11 @@ const Icons = {
 function StatutBadge({ statut }: { statut: EmailEntry['statut'] }) {
   const config: Record<string, { icon: React.ReactNode; label: string; cls: string }> = {
     envoyé:  { icon: <Icons.Send />,  label: 'Envoyé',  cls: 'bg-zinc-100 text-zinc-500' },
+    délivré: { icon: <Icons.Delivered />, label: 'Délivré', cls: 'bg-zinc-100 text-zinc-700' },
     ouvert:  { icon: <Icons.Eye />,   label: 'Ouvert',  cls: 'bg-zinc-900 text-white' },
     cliqué:  { icon: <Icons.Click />, label: 'Cliqué',  cls: 'bg-zinc-900 text-white' },
+    bounce:  { icon: <Icons.Alert />, label: 'Bounce',  cls: 'border border-zinc-400 text-zinc-700' },
+    plainte: { icon: <Icons.Alert />, label: 'Plainte', cls: 'border border-zinc-400 text-zinc-700' },
   }
   const c = config[statut] ?? config['envoyé']
   return (
@@ -179,7 +193,7 @@ export default function SuiviPage() {
     silent ? setRefreshing(true) : setLoading(true)
     setError('')
     try {
-      const res = await fetch(`/api/suivi?page=${p}`)
+      const res = await fetch(`/api/suivi?page=${p}`, { cache: 'no-store' })
       if (!res.ok) throw new Error('Erreur serveur')
       setData(await res.json())
     } catch (e: any) {

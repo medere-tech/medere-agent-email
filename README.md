@@ -52,7 +52,7 @@ L'Agent Mail DPC permet aux commerciaux Médéré de générer et envoyer un mai
 | Airtable | Base de données formations, sessions, commerciaux, inscriptions |
 | HubSpot | CRM — recherche contacts PS + Notes |
 | Resend | Envoi des emails + webhooks d'ouverture/clic |
-| Upstash KV (Redis) | Relances J+3, tracking des emails, idempotence, dédoublonnage des webhooks |
+| Upstash KV (Redis) via `@upstash/redis` | Tracking des emails, compteurs journaliers, index, relances J+3, idempotence, dédoublonnage des webhooks |
 | Claude (Anthropic) | Génération des mails personnalisés |
 | Slack | Notifications relances J+3 aux commerciaux |
 | Google OAuth 2.0 | Authentification (comptes @medere.fr) |
@@ -91,11 +91,17 @@ medere-agent-email/
 │   ├── airtable.ts                       # Fonctions Airtable
 │   ├── auth.ts                           # Session JWT (cookie)
 │   ├── claude.ts                         # Génération mail IA
-│   └── hubspot.ts                        # Recherche contacts + Notes HubSpot
+│   ├── config.ts                         # Constantes (RETENTION_DAYS, seuil des événements automatiques…)
+│   ├── hubspot.ts                        # Recherche contacts + Notes HubSpot
+│   ├── kv.ts                             # Client Upstash Redis (KV_REST_API_URL / KV_REST_API_TOKEN)
+│   ├── kv-schema.ts                      # Noms de clés KV, jours, scripts Lua atomiques (sans import)
+│   └── tracking.ts                       # Enregistrement des envois, événements webhook, stats, purge RGPD
 ├── docs/
 │   └── TESTS.md                          # Protocole de test complet
 ├── scripts/
+│   ├── migrate-kv.ts                     # Export / migration v2 / restauration des données KV
 │   └── seed-test.ts                      # Crée / supprime les données de test (base KV de test)
+├── backups/                              # Exports KV (migrate-kv.ts --export) — ignoré par git
 ├── middleware.ts                         # Protection des routes + CVE-2025-29927
 ├── vercel.json                           # Configuration cron Vercel
 └── .env.local                            # Variables d'environnement (local, non versionné)
@@ -273,10 +279,14 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 ## Relances automatiques J+3
 
 ### Fonctionnement
-À chaque envoi, une clé est stockée dans Upstash KV :
+À chaque envoi, la relance est planifiée dans le même script atomique que le tracking :
 ```
-relance:{timestamp} → { commercial_slack_id, ps_nom, ps_email, ps_rpps, formation_numero, relance_at, ... }   (expire ≈ J+7)
+relances_due   (sorted set)  membre = resend_id, score = jour d'échéance J+3 (heure de Paris) à 00:00 UTC
+email_track:{resend_id}      contient ce dont la relance a besoin : commercial_slack_id, ps_rpps, formation_numero, relance_due_day
 ```
+Les anciennes clés `relance:{timestamp}` (avant la migration v2) sont reprises par `scripts/migrate-kv.ts` : rattachées à leur envoi quand c'est possible, sinon planifiées telles quelles (`legacy:relance:{timestamp}` dans `relances_due`).
+
+> La lecture de `relances_due` par le cron (rattrapage, statut, lien vers la relance) arrive avec le lot 3 « Relances ». Le comportement décrit ci-dessous est celui du cron actuel, qui lit encore les clés `relance:*`.
 
 Le cron Vercel tourne tous les jours à 8h UTC (`0 8 * * *`). Pour chaque clé `relance:*` dont `relance_at === aujourd'hui` :
 1. Vérifie dans Airtable si le PS est déjà inscrit à une session de la formation (par RPPS ; sans RPPS, le RPPS est retrouvé via l'email dans la table Clients). Si oui → la clé est supprimée, pas de DM.
@@ -298,7 +308,7 @@ Dans `vercel.json` :
 Le cron exige `Authorization: Bearer $CRON_SECRET` (ajouté automatiquement par Vercel). Sans `CRON_SECRET`, la route répond 500.
 
 ### Vérifier le cron
-Vercel → projet → **Cron Jobs** dans le menu gauche → voir le dernier statut d'exécution. La réponse JSON contient `{ date, notified, errors }`.
+Vercel → projet → **Cron Jobs** dans le menu gauche → voir le dernier statut d'exécution. La réponse JSON contient `{ date, notified, purged, errors }` (`purged` : envois supprimés par la purge RGPD, voir plus bas).
 
 ---
 
@@ -306,29 +316,77 @@ Vercel → projet → **Cron Jobs** dans le menu gauche → voir le dernier stat
 
 Page accessible à `/suivi` — réservée aux utilisateurs connectés.
 
-### Clés KV
+### Clés KV (schéma v2)
+
+Les noms de clés et les scripts Lua sont centralisés dans `lib/kv-schema.ts`. Toute écriture qui touche plusieurs clés (envoi, événement webhook, migration) passe par un **script Lua atomique**.
 
 | Clé | Type | Contenu | Expiration | Écrit par |
 |-----|------|---------|------------|-----------|
-| `email_track:{resend_id}` | JSON | Données de l'envoi : `statut`, `sent_at`, `opened_at`, `clicked_at`, `first_opened_at`, `first_clicked_at`… | aucune | `/api/send` (création NX), webhook (mise à jour atomique) |
-| `emails_index` | sorted set | `resend_id` par date d'envoi (pagination de `/suivi`) | aucune | `/api/send` |
-| `relance:{timestamp}` | JSON | Données de relance J+3 | ≈ J+7 | `/api/send` |
+| `email_track:{resend_id}` | JSON | Données de l'envoi (détail ci-dessous) | aucune — purge RGPD | `/api/send` (création NX), webhook, migration |
+| `email_body:{resend_id}` | JSON | `{ corps }` du mail, pour pré-remplir une relance | 90 jours (`EMAIL_BODY_TTL_DAYS`) | `/api/send`, migration |
+| `emails_index` | sorted set | `resend_id` des envois initiaux, score = date d'envoi (ms) | aucune — purge RGPD | `/api/send` |
+| `idx:commercial:{clé}` | sorted set | Envois d'un commercial (clé = email en minuscules, ou `nom:{slug}` pour un ancien envoi non rattaché) | aucune — purge RGPD | `/api/send`, migration |
+| `idx:contact:{contactId}` | sorted set | Envois à un contact HubSpot (alerte « déjà contacté ») | aucune — purge RGPD | `/api/send`, migration |
+| `stats:day:{AAAA-MM-JJ}` | hash | Compteurs du **jour d'envoi** (heure de Paris) : `sent`, `delivered`, `opened`, `clicked`, `bounced`, `complained`, et les mêmes suffixés `\|{clé commercial}` | fin du jour + `RETENTION_DAYS` | `/api/send`, webhook, migration |
+| `meta:commerciaux` | hash | Clé commercial → nom affiché | aucune | `/api/send`, migration |
+| `relances_due` | sorted set | Relances J+3 planifiées (voir Relances) | membre retiré une fois traité | `/api/send`, migration |
+| `meta:schema_version` | string | `2` une fois `scripts/migrate-kv.ts` passé | aucune | migration |
 | `send_result:{resend_id}` | JSON | Réponse du premier envoi, renvoyée en cas de rejeu idempotent | 24 h | `/api/send` |
 | `webhook_event:{svix-id}` | flag | Dédoublonnage : un événement webhook n'est traité qu'une fois | 7 jours | webhook |
-| `hubspot_note:{resend_id}:{opened\|clicked}` | flag | Verrou « une seule Note HubSpot par type d'événement » (`legacy` pour les entrées antérieures) | aucune | webhook |
+| `hubspot_note:{resend_id}:{opened\|clicked}` | flag | Verrou « une seule Note HubSpot par type d'événement » (`legacy` pour les entrées antérieures) | aucune — purge RGPD | webhook, migration |
+| `relance:{timestamp}` | JSON | **Ancien format** de relance, repris par la migration | ≈ J+7 | (plus écrit) |
+
+Champs de `email_track` : les champs historiques (`contact_id`, `ps_nom`, `ps_email`, `commercial_name`, `formation_nom`, `sujet`, `statut`, `sent_at`, `opened_at`, `clicked_at`) sont conservés tels quels, si bien qu'une entrée v2 reste lisible par l'ancien code. Champs ajoutés :
+`v` (2), `kind` (`initial` / `relance`), `sent_day`, `commercial_key`, `commercial_email`, `commercial_slack_id`, `commercial_hubspot_id`, `ps_rpps`, `formation_numero`, `relance_due_day`, `message_id`, `delivered_at`, `bounced_at`, `complained_at`, `first_opened_at`, `first_clicked_at`, `last_opened_at`, `open_count`, `click_count`, `auto_open_count`, `auto_click_count`, `first_auto_opened_at`, `first_auto_clicked_at`, et les drapeaux internes `counted_*` (un fait n'est compté qu'une fois).
+
+### Statuts
+- **Envoyé** : mail transmis via Resend
+- **Délivré** : accepté par le serveur du PS (`email.delivered`)
+- **Ouvert** : le PS a ouvert le mail (ouverture non automatique)
+- **Cliqué** : le PS a cliqué un lien (clic non automatique)
+- **Bounce** : adresse rejetée (`email.bounced`) — état final
+- **Plainte** : le PS a signalé le mail comme spam (`email.complained`) — état final
+
+Le statut est **monotone** (envoyé < délivré < ouvert < cliqué) : un événement plus faible ne le fait jamais redescendre. **Bounce et plainte sont prioritaires** sur tous les autres (une plainte prime sur un bounce). Les dates `first_*` sont écrites une seule fois ; `last_opened_at`, `open_count` et `click_count` suivent chaque ouverture et clic.
+
+### Ouvertures et clics automatiques
+Une ouverture ou un clic survenu **moins de 60 secondes après la livraison** (à défaut, après l'envoi) est marqué « probablement automatique » : antivirus, passerelles de sécurité, proxys de messagerie (`AUTO_EVENT_WINDOW_SECONDS` dans `lib/config.ts`). Il est stocké (`auto_open_count`, `first_auto_*_at`) mais ne fait pas avancer le statut, ne compte pas dans les taux et ne crée ni Note HubSpot ni notification. La première ouverture humaine qui suit est comptée normalement. La date de référence est celle de l'événement chez Resend (`created_at`), pas celle de réception.
 
 ### Stats
-Calculées sur la **totalité** des emails dans l'index — pas un sous-ensemble.
+Les stats d'une période sont la **somme des compteurs journaliers** `stats:day:*` des jours de la période : plus aucune lecture de tout l'historique. Un envoi est compté au **jour de son envoi** (heure de Paris) : une ouverture le 5 d'un mail envoyé le 1er compte pour le 1er, ce qui garde les taux sous 100 %.
+- `opened` compte les envois ouverts **ou** cliqués (un clic sans ouverture détectée, pixel bloqué, compte comme une ouverture).
+- `delivered` compte aussi les envois ouverts ou cliqués (une ouverture prouve la livraison).
+- Tant que la migration v2 n'a pas été passée (`meta:schema_version` absent), les stats sont calculées sur les entrées elles-mêmes, avec les mêmes règles.
 
 ### Colonnes affichées
 PS (nom + email) · Commercial · Formation · Statut · Envoyé · Lien HubSpot
 
-### Statuts
-- **Envoyé** : mail transmis via Resend
-- **Ouvert** : PS a ouvert le mail (via webhook Resend)
-- **Cliqué** : PS a cliqué un lien dans le mail (via webhook Resend)
+### Rétention RGPD
+Les envois sont conservés **3 ans** : constante `RETENTION_DAYS = 1095` en haut de `lib/config.ts`.
+- Le cron quotidien purge les envois plus anciens : `email_track`, `email_body`, `send_result`, verrous `hubspot_note:*`, entrées de `emails_index`, `idx:commercial:*`, `idx:contact:*` et `relances_due` (et la relance rattachée à l'envoi, lot 3). Le nombre d'envois purgés est renvoyé dans `purged`.
+- Les compteurs `stats:day:*` expirent d'eux-mêmes (EXPIREAT fin du jour + `RETENTION_DAYS`).
+- Le corps des mails (`email_body`) n'est gardé que 90 jours (`EMAIL_BODY_TTL_DAYS`) : il ne sert qu'à pré-remplir une relance. **Limite** : pour un mail plus ancien, le corps est redemandé à Resend (`GET /emails/{id}`) ; si Resend ne le fournit plus (durée de conservation de Resend dépassée), la relance s'ouvre **sans le corps d'origine**, avec un message qui l'indique, et le commercial complète le texte ou le fait régénérer par Claude.
+- **Seul le KV est purgé** : les Notes HubSpot ne sont pas concernées.
 
-Le statut est **monotone** (envoyé < ouvert < cliqué) : une ouverture après un clic ne fait pas redescendre le statut. Les dates affichées sont celles de la **première** ouverture et du **premier** clic.
+### Migration des données (schéma v2) — à faire une fois après le déploiement
+Le code fonctionne **avant et après** la migration : avant, les anciennes entrées restent lisibles et les stats sont calculées sur les entrées ; les événements webhook mettent à jour une ancienne entrée sans toucher aux compteurs (la migration la comptera, d'où l'absence de double comptage). La migration reconstruit compteurs et index à partir des `email_track` existants et reprend les clés `relance:*`.
+
+Sur la base de **production**, juste après le déploiement et **avant le prochain cron de 8h UTC** (le nouveau cron lit `relances_due`) :
+```bash
+H=<hôte de la base KV de production>                                   # ex. xxx.upstash.io, vérifié contre KV_REST_API_URL
+node scripts/migrate-kv.ts --host=$H --export                         # 1. sauvegarde complète (backups/kv-export-<hôte>-<date>.json)
+node scripts/migrate-kv.ts --host=$H --dry-run                        # 2. rapport, aucune écriture
+node scripts/migrate-kv.ts --host=$H                                  # 3. migration (refusée sans export de moins d'une heure)
+# retour arrière si besoin :
+node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json            # plan, aucune écriture
+node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json --confirm  # restauration
+```
+- Node ≥ 22.18 (le script TypeScript s'exécute sans compilation ni dépendance).
+- `.env.local` (ou `ENV_FILE=<fichier>`) doit contenir les `KV_REST_API_*` de la base visée, et `AIRTABLE_*`.
+- **Idempotente** : une entrée déjà migrée est ignorée ; relancer la commande ne change rien.
+- **Correspondance nom → email** : les anciens envois ne stockaient que le nom du commercial. Un nom n'est rattaché à un email que s'il correspond à **une seule** fiche Commerciaux **et** que le prénom de la fiche correspond à l'email (« Sarah Smadja » → `sarah.s@`). Sinon, la clé est `nom:{slug}` et le cas est listé dans le rapport `--dry-run` (ex. « Loane Deluge » dont la fiche porte `justine.m@`).
+- **Restauration** : réécrit les clés de l'export (valeur et TTL restant au moment de l'export) et supprime les clés créées depuis. Les écritures faites entre l'export et la restauration (nouveaux envois, webhooks) sont perdues.
+- Les exports contiennent des données personnelles : les garder hors du dépôt (`backups/` est ignoré par git) et les supprimer après usage.
 
 ---
 
@@ -340,14 +398,14 @@ Dans resend.com → Webhooks → endpoint :
 https://medere-agent-email-dpc.vercel.app/api/webhooks/resend
 ```
 
-Événements **traités** : `email.opened` et `email.clicked`. Les autres événements éventuellement activés dans Resend (`email.sent`, `email.delivered`, `email.bounced`…) sont reçus puis ignorés (réponse 200).
+Événements **traités** : `email.delivered`, `email.bounced`, `email.complained`, `email.opened` et `email.clicked`. **Les cinq doivent être cochés** sur l'endpoint dans Resend (sans `delivered`, la détection des ouvertures automatiques se base sur la date d'envoi ; sans `bounced` / `complained`, ces statuts n'apparaissent jamais). Les autres événements éventuellement activés (`email.sent`…) sont reçus puis ignorés (réponse 200).
 
 ### Fonctionnement
 1. Resend envoie un webhook signé ; la signature (Svix) est vérifiée sur le body brut. Signature invalide → **400** (seul cas d'erreur).
 2. Signature valide → réponse **200** dans tous les cas ; une erreur de traitement est journalisée (`[WEBHOOK] Erreur de traitement`) mais ne provoque pas de rejeu par Resend.
 3. Dédoublonnage par `svix-id` (`webhook_event:*`).
-4. Mise à jour atomique de `email_track:{id}` par un script Lua (statut monotone, `first_*_at` écrits une seule fois). Un `email_id` absent du KV (ex. copie commerciale) est ignoré.
-5. Une seule Note HubSpot par type d'événement et par email (`hubspot_note:*`). Si HubSpot échoue, le verrou est relâché : l'événement suivant du même type recréera la Note.
+4. Mise à jour atomique de `email_track:{id}` **et** des compteurs du jour d'envoi par un script Lua (`EVENT_SCRIPT`, voir Statuts). Le `message_id` fourni par Resend est enregistré (fil de discussion des relances). Un `email_id` absent du KV (ex. copie commerciale) est ignoré.
+5. Une seule Note HubSpot par type (première ouverture humaine, premier clic humain), jamais pour un événement automatique ni pour délivré / bounce / plainte (`hubspot_note:*`). Si HubSpot échoue, le verrou est relâché : l'événement suivant du même type recréera la Note.
 
 ---
 

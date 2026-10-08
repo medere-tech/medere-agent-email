@@ -45,10 +45,18 @@ export TEST_SLACK_USER_ID=<slack-id-du-testeur>
 
 ```bash
 cp .env.local /chemin/hors-repo/env.backup && sha256sum .env.local   # noter l'empreinte
-npm run dev                                                          # http://localhost:3000
-node --no-warnings scripts/seed-test.ts seed            # entrées test-seed-envoye et test-legacy
-# option : --relance crée relance:test-seed-today (1 DM au prochain appel du cron)
+# Export de référence de la base de TEST : sert au nettoyage final (§5)
+node --no-warnings scripts/migrate-kv.ts --host=$TEST_KV_HOST --export
+npm run dev                                                          # http://localhost:3000 (vérifier le port affiché)
+node --no-warnings scripts/seed-test.ts seed            # entrées test-seed-envoye et test-legacy (format d'avant v2)
+# --relance : relance:test-seed-today (rattachable à test-seed-envoye) + relance:test-seed-orphan
+# --names   : test-legacy-kaoufer (→ kaoufer@medere.fr) et test-legacy-loane (→ nom:loane-deluge)
 ```
+
+> Vérifier qu'aucun autre `next dev` du dépôt ne tourne déjà (`localhost:3000` occupé → le serveur démarre sur 3001, et deux serveurs partagent le même dossier `.next`).
+> **Avant tout test qui peut envoyer un DM Slack** (cron, webhook de clic à partir du lot 3) : `node --no-warnings scripts/seed-test.ts check-slack`. La commande refuse (exit 1) si une clé de la base de test contient un identifiant Slack autre que `TEST_SLACK_USER_ID` (une relance laissée par un test manuel peut porter le `slack_user_id` d'un vrai commercial).
+> Rejouer exactement le même événement webhook (test du dédoublonnage) : `seed-test.ts webhook opened <id> --svix-id=<suffixe>` deux fois.
+> En fin de lot : `npm run build` doit réussir (arrêter d'abord `npm run dev`, les deux écrivent dans `.next`).
 
 ---
 
@@ -125,6 +133,31 @@ Créer une clé `relance:*` datée du jour (`--relance` du seed, ou à la main) 
 | F5 | `/api/formations` avec `FORMATIONS_REQUIRE_FUTURE_SESSION = false` | même nombre qu'un comptage Airtable `Active` + numéro DPC |
 | F6 | (optionnel) passer la constante à `true` | uniquement les formations avec session future ; **remettre `false`** |
 
+### H. Fondations des données (schéma v2)
+
+Webhooks : `seed-test.ts webhook <delivered|bounced|complained|opened|clicked> <id> [--created-at=<iso>] [--message-id=<id>]`.
+Compteurs : `HGETALL stats:day:<jour d'envoi>` ; entrée : `GET email_track:<id>`.
+
+| # | Étapes | Attendu |
+|---|---|---|
+| H1 | Envoi réel `[TEST-H]` | `email_track` avec `v: 2`, `sent_day`, `commercial_key` ; `email_body` (TTL ≈ 90 j) ; membre dans `emails_index`, `idx:commercial:<email>`, `idx:contact:<id>`, `relances_due` (score = J+3 00:00 UTC) ; `stats:day` : `sent` +1 et `sent\|<email>` +1 ; plus aucune clé `relance:*` créée |
+| H2 | `delivered --message-id=<x>` sur H1 | statut `délivré`, `delivered_at`, `message_id` ; `delivered` +1 |
+| H3 | `opened --created-at=<livraison + 10 s>` | `auto_open_count: 1`, `first_auto_opened_at` ; statut, `open_count` et compteurs inchangés ; aucune Note |
+| H4 | `opened` (maintenant, > 60 s) puis 2 × `opened` | statut `ouvert`, `first_opened_at` figé, `last_opened_at` mis à jour, `open_count: 3` ; `opened` +1 une seule fois ; 1 seule Note « ouvert » |
+| H5 | `clicked --created-at=<livraison + 5 s>` puis `clicked` | 1er clic automatique (aucune Note, aucun compteur) ; 2e : statut `cliqué`, `clicked` +1, 1 Note « cliqué » |
+| H6 | `bounced` sur un autre envoi déjà ouvert | statut `bounce` (prioritaire), `bounced` +1 ; puis `opened` → statut reste `bounce` |
+| H7 | `complained` | statut `plainte`, `complained` +1 |
+| H8 | Webhooks sur `test-legacy` **avant** migration | entrée mise à jour, verrou `legacy`, aucune Note « ouvert », **aucun** compteur modifié |
+| H9 | `/suivi` avant migration | toutes les entrées lisibles, stats calculées sur les entrées ; badges Délivré / Bounce / Plainte |
+| H10 | `migrate-kv.ts --dry-run` (après `seed --relance --names`) | rapport : compteurs par jour, commerciaux, « À VALIDER » (`Commercial de test`, `Loane Deluge`), relances rattachées / legacy ; **DBSIZE inchangé** |
+| H11 | `--host` faux ; migration sans export de moins d'une heure (`--backup-dir` vide) | les deux refusées (exit 1) |
+| H12 | `--export` puis migration réelle | entrées en `v: 2`, compteurs et index créés, `relance:test-seed-today` rattachée et supprimée, `legacy:relance:test-seed-orphan` dans `relances_due`, `meta:schema_version = 2` |
+| H13 | Relancer la migration ; comparer deux exports avant / après | « 0 envoi(s) migré(s) », aucune différence de valeur (hash comparés sans ordre) |
+| H14 | `--restore=<export H12>` sans puis avec `--confirm` | plan sans écriture ; puis base identique à l'export (clés, valeurs, TTL) |
+| H15 | Webhooks sur `test-legacy` **après** migration | aucune nouvelle Note « ouvert », compteurs non doublés |
+| H16 | `/suivi` après migration | stats = somme des `stats:day:*` ; mêmes chiffres qu'avant migration |
+| H17 | Purge : entrée de test datée de 1 100 jours (score de `emails_index` + entrées d'index), puis appel du cron | `purged: 1`, `email_track`, `email_body`, verrous et membres d'index supprimés ; les autres envois intacts |
+
 ### G. Non-régression complète
 
 Connexion Google → génération → envoi → `opened` → `clicked` → `/suivi` (statut « Cliqué », dates) → déconnexion.
@@ -135,14 +168,18 @@ Connexion Google → génération → envoi → `opened` → `clicked` → `/sui
 ## 5. Nettoyage
 
 ```bash
-node --no-warnings scripts/seed-test.ts clean     # supprime test-seed-*, test-legacy, webhook_event:msg_seedtest_*
+node --no-warnings scripts/seed-test.ts clean     # supprime test-seed-*, test-legacy*, webhook_event:msg_seedtest_*, membres d'index de test
 ```
 
 Puis, pour les envois réels faits pendant les tests :
 
-1. **KV de test** : revérifier l'hôte, lister puis supprimer les clés créées pendant la session :
-   `email_track:*`, `emails_index`, `send_result:*`, `hubspot_note:*`, `relance:*`, `webhook_event:*`.
-   Ne jamais supprimer la base elle-même.
+1. **KV de test** : revérifier l'hôte, puis remettre la base dans son état de début de session avec l'export de référence (§3) :
+   ```bash
+   node --no-warnings scripts/migrate-kv.ts --host=$TEST_KV_HOST --restore=backups/<export-de-référence>.json            # liste ce qui sera supprimé
+   node --no-warnings scripts/migrate-kv.ts --host=$TEST_KV_HOST --restore=backups/<export-de-référence>.json --confirm
+   ```
+   Cela retire aussi les compteurs `stats:day:*`, `meta:*` et index alimentés par les tests. Ne jamais supprimer la base elle-même.
+   Supprimer ensuite les exports de `backups/` (données personnelles).
 2. **HubSpot** : supprimer uniquement les Notes du contact de test créées pendant la session (vérifier l'association au contact avant chaque suppression).
 3. **Gmail** : mettre à la corbeille uniquement les mails dont le sujet commence par `[TEST-` (vérifier le sujet ligne par ligne, ne rien ouvrir d'autre).
 4. **Slack** : le testeur supprime lui-même les DM de relance.

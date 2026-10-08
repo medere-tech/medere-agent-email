@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
 import { logEmailActivity } from '@/lib/hubspot'
+import { getKv, kvConfigured } from '@/lib/kv'
+import { recordSend } from '@/lib/tracking'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
 
@@ -93,40 +95,26 @@ export async function POST(req: NextRequest) {
 
     // À partir d'ici le mail est parti : aucune erreur ne doit renvoyer 500,
     // sinon le commercial renverrait un mail déjà reçu par le PS.
-    const kvEnabled = !!(resendId && process.env.KV_REST_API_URL)
+    const kvEnabled = !!(resendId && kvConfigured())
 
-    // 1 bis. Tracking KV (hors du try Resend). NX : si la clé existe déjà, c'est un
+    // 1 bis. Tracking KV (hors du try Resend), en une écriture atomique : email_track (NX),
+    // index, compteur du jour, corps et relance J+3. Si l'envoi existe déjà, c'est un
     // rejeu idempotent du même envoi → on ne recrée ni Note, ni relance, ni copie.
+    let relanceStored = false
+    let relanceDate = ''
     if (kvEnabled) {
       try {
-        const { kv } = await import('@vercel/kv')
-        const created = await kv.set(
-          `email_track:${resendId}`,
-          {
-            contact_id: ps.id,
-            ps_nom: `${ps.titre} ${ps.prenom} ${ps.nom}`.trim(),
-            ps_email: ps.email,
-            commercial_name: commercial.name,
-            formation_nom: formation.nom,
-            sujet,
-            statut: 'envoyé',
-            sent_at: new Date().toISOString(),
-            opened_at: null,
-            clicked_at: null,
-          },
-          { nx: true }
-        )
-
-        if (created === null) {
-          const previous = await kv.get<Record<string, any>>(`send_result:${resendId}`)
+        const recorded = await recordSend({ resendId: resendId!, commercial, ps, formation, sujet, corps })
+        if (!recorded.created) {
+          const previous = await getKv().get<Record<string, any>>(`send_result:${resendId}`)
           if (previous) return NextResponse.json({ ...previous, replay: true })
           return NextResponse.json({
             success: false,
             error: 'Ce mail a déjà été envoyé (traitement en cours). Vérifie la page Suivi avant de renvoyer.',
           }, { status: 409 })
         }
-
-        await kv.zadd('emails_index', { score: Date.now(), member: resendId! })
+        relanceStored = true
+        relanceDate = recorded.relanceDate
       } catch (e: any) {
         console.error('[SEND] Tracking KV non enregistré pour', resendId, ':', e.message)
       }
@@ -161,49 +149,20 @@ export async function POST(req: NextRequest) {
       fromName: commercial.name,
     })
 
-    // 3. Stocker pour relance J+3
-    const relanceDate = new Date()
-    relanceDate.setDate(relanceDate.getDate() + 3)
-
-    let relanceStored = false
-    try {
-      if (process.env.KV_REST_API_URL) {
-        const { kv } = await import('@vercel/kv')
-        const key = `relance:${Date.now()}`
-        await kv.set(key, {
-          commercial_slack_id: commercial.slack_user_id,
-          commercial_name: commercial.name,
-          ps_nom: `${ps.titre} ${ps.prenom} ${ps.nom}`,
-          ps_email: ps.email,
-          ps_rpps: ps.rpps || '',
-          ps_hubspot_id: ps.id,
-          formation_nom: formation.nom,
-          formation_numero: formation.numero,
-          sujet,
-          corps,
-          sent_at: new Date().toISOString(),
-          relance_at: relanceDate.toISOString().split('T')[0],
-        }, { exat: Math.floor(relanceDate.getTime() / 1000) + 86400 * 4 }) // expire J+4
-        relanceStored = true
-      }
-    } catch (e) {
-      console.error('KV store error:', e)
-    }
-
+    // 3. La relance J+3 est planifiée par recordSend (relances_due, lue par le cron)
     const result = {
       success: true,
       resend_id: resendId,
       hubspot_logged: hubspotResult.success,
       relance_stored: relanceStored,
-      relance_date: relanceDate.toISOString().split('T')[0],
+      relance_date: relanceDate,
     }
 
     // Mémorise la réponse 24 h (durée de validité des clés d'idempotence Resend)
     // pour la renvoyer telle quelle en cas de rejeu.
     if (kvEnabled) {
       try {
-        const { kv } = await import('@vercel/kv')
-        await kv.set(`send_result:${resendId}`, result, { ex: 86400 })
+        await getKv().set(`send_result:${resendId}`, result, { ex: 86400 })
       } catch (e: any) {
         console.error('[SEND] send_result non enregistré:', e.message)
       }
