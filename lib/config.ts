@@ -56,3 +56,13 @@ export const RATE_LIMITS = {
 
 // Cache des tables Airtable lues en entier (formations, sessions) : en mémoire et dans le KV
 export const AIRTABLE_CACHE_SECONDS = 300
+
+// Destinataire des alertes techniques (DM Slack) : erreurs du cron, Note HubSpot en échec définitif
+export const ALERT_SLACK_USER_ID = 'U05UVHGBURX'
+
+// Notes HubSpot en échec : nouvel essai par le cron toutes les N heures, alerte après le dernier essai
+export const HUBSPOT_RETRY_DELAY_HOURS = 6
+export const HUBSPOT_RETRY_MAX_ATTEMPTS = 4
+
+// Relance J+3 par DM Slack : nombre d'essais si Slack échoue (un par passage du cron)
+export const SLACK_RELANCE_MAX_ATTEMPTS = 3

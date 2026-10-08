@@ -24,6 +24,8 @@ export const KEYS = {
   sendResult: (id: string) => `send_result:${id}`,
   noteLock: (id: string, kind: 'opened' | 'clicked') => `hubspot_note:${id}:${kind}`,
   clicks: (id: string) => `email_clicks:${id}`,
+  relanceLock: (parentId: string) => `relance_lock:${parentId}`,
+  hubspotRetry: 'hubspot_retry',
   emailsIndex: 'emails_index',
   byCommercial: (key: string) => `idx:commercial:${key}`,
   byContact: (contactId: string) => `idx:contact:${contactId}`,
@@ -395,4 +397,32 @@ redis.call('ZREM', KEYS[5], ARGV[1])
 redis.call('ZREM', KEYS[6], ARGV[1])
 redis.call('DEL', KEYS[1], KEYS[7], KEYS[8], KEYS[9], KEYS[10], KEYS[11])
 return decremented
+`
+
+// Rattache une relance à son mail d'origine : relance_id posé une seule fois, relance J+3 Slack
+// retirée (une relance mail est partie). KEYS : 1 track d'origine, 2 relances_due
+// ARGV : 1 id de la relance, 2 date ISO. Retour : 1 rattachée, 0 mail inconnu, -1 autre relance déjà rattachée
+export const ATTACH_CHILD_SCRIPT = LUA_COMMON + `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local d = cjson.decode(raw)
+local parentId = string.sub(KEYS[1], string.len('email_track:') + 1)
+if isset(d.relance_id) and d.relance_id ~= ARGV[1] then return -1 end
+d.relance_id = ARGV[1]
+if not isset(d.relance_sent_at) then d.relance_sent_at = ARGV[2] end
+redis.call('SET', KEYS[1], encode(d))
+redis.call('ZREM', KEYS[2], parentId)
+return 1
+`
+
+// Pose un champ une seule fois (ex. click_notified_at : un seul DM de premier clic par envoi)
+// KEYS : 1 track ; ARGV : 1 champ, 2 valeur. Retour : 1 posé maintenant, 0 déjà posé ou envoi inconnu
+export const MARK_ONCE_SCRIPT = LUA_COMMON + `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local d = cjson.decode(raw)
+if isset(d[ARGV[1]]) then return 0 end
+d[ARGV[1]] = ARGV[2]
+redis.call('SET', KEYS[1], encode(d))
+return 1
 `

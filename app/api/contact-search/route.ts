@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { searchContacts } from '@/lib/hubspot'
+import { searchContacts, type SearchPart } from '@/lib/hubspot'
 import { requireActor } from '@/lib/identity'
 
 export async function GET(req: NextRequest) {
@@ -10,7 +10,10 @@ export async function GET(req: NextRequest) {
   if (!q || q.length < 2) return NextResponse.json({ contacts: [] })
 
   try {
-    const contacts = await searchContacts(q)
+    // part=first : première passe (affichée tout de suite) ; part=rest : passes complémentaires
+    const p = req.nextUrl.searchParams.get('part')
+    const part: SearchPart = p === 'first' || p === 'rest' ? p : 'all'
+    const contacts = await searchContacts(q, part)
     return NextResponse.json({ contacts })
   } catch (e: any) {
     console.error('[CONTACT-SEARCH] HubSpot indisponible:', e.message)

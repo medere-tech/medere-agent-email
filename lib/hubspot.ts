@@ -1,11 +1,10 @@
-const HS_TOKEN = process.env.HUBSPOT_TOKEN!
 const HS_BASE = 'https://api.hubapi.com'
 
 async function hs(path: string, options: RequestInit = {}, attempt = 0): Promise<any> {
   const res = await fetch(`${HS_BASE}${path}`, {
     ...options,
     headers: {
-      Authorization: `Bearer ${HS_TOKEN}`,
+      Authorization: `Bearer ${process.env.HUBSPOT_TOKEN}`,
       'Content-Type': 'application/json',
       ...(options.headers || {}),
     },
@@ -40,7 +39,11 @@ function normalizeQuery(str: string): string {
     .trim()
 }
 
-export async function searchContacts(query: string): Promise<HSContact[]> {
+// part : 'first' = première passe seule (la plus pertinente : email, RPPS ou recherche texte),
+// affichée tout de suite ; 'rest' = passes complémentaires, ajoutées ensuite ; 'all' = tout.
+export type SearchPart = 'all' | 'first' | 'rest'
+
+export async function searchContacts(query: string, part: SearchPart = 'all'): Promise<HSContact[]> {
   if (!query || query.trim().length < 2) return []
 
   const isEmail = query.includes('@')
@@ -128,7 +131,8 @@ export async function searchContacts(query: string): Promise<HSContact[]> {
     }
   }
 
-  const responses = await Promise.all(passes.map((body) => hs('/crm/v3/objects/contacts/search', {
+  const selected = part === 'first' ? passes.slice(0, 1) : part === 'rest' ? passes.slice(1) : passes
+  const responses = await Promise.all(selected.map((body) => hs('/crm/v3/objects/contacts/search', {
     method: 'POST',
     body: JSON.stringify(body),
   })))
@@ -171,31 +175,35 @@ export function buildSentNoteBody(params: LogEmailParams): string {
 
 // Crée une Note sur la fiche du contact PS (scope requis : crm.objects.notes.write).
 // Ne lève jamais : renvoie success:false en cas d'échec, l'envoi du mail n'est pas bloqué.
-export async function logEmailActivity(params: LogEmailParams): Promise<{ success: boolean; id?: string }> {
-  try {
-    const noteBody = buildSentNoteBody(params)
-
-    const note = await hs('/crm/v3/objects/notes', {
-      method: 'POST',
-      body: JSON.stringify({
-        properties: {
-          hs_timestamp: new Date().toISOString(),
-          hubspot_owner_id: params.hubspotOwnerId,
-          hs_note_body: noteBody,
+// Crée une Note associée à un contact (lève une erreur si HubSpot refuse)
+export async function createNote(contactId: string, body: string, ownerId?: string): Promise<string> {
+  const note = await hs('/crm/v3/objects/notes', {
+    method: 'POST',
+    body: JSON.stringify({
+      properties: {
+        hs_timestamp: new Date().toISOString(),
+        ...(ownerId ? { hubspot_owner_id: ownerId } : {}),
+        hs_note_body: body,
+      },
+      associations: [
+        {
+          to: { id: parseInt(contactId) },
+          types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 202 }],
         },
-        associations: [
-          {
-            to: { id: parseInt(params.contactId) },
-            types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 202 }],
-          },
-        ],
-      }),
-    })
+      ],
+    }),
+  })
+  return String(note.id)
+}
 
-    console.log('[HUBSPOT] Note créée, ID:', note.id)
-    return { success: true, id: note.id }
+export async function logEmailActivity(params: LogEmailParams): Promise<{ success: boolean; id?: string; body: string; error?: string }> {
+  const noteBody = buildSentNoteBody(params)
+  try {
+    const id = await createNote(params.contactId, noteBody, params.hubspotOwnerId)
+    console.log('[HUBSPOT] Note créée, ID:', id)
+    return { success: true, id, body: noteBody }
   } catch (e: any) {
     console.error('[HUBSPOT] Erreur note:', e.message)
-    return { success: false }
+    return { success: false, body: noteBody, error: e.message }
   }
 }

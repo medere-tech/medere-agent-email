@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { Resend } from 'resend'
 import { getKv } from '@/lib/kv'
-import { applyEvent, firstHumanClick, type TrackingEvent } from '@/lib/tracking'
+import { applyEvent, firstHumanClick, markOnce, type TrackingEvent } from '@/lib/tracking'
+import { createNote } from '@/lib/hubspot'
+import { enqueueNote } from '@/lib/note-queue'
+import { hubspotContactUrl, sendSlackDM } from '@/lib/slack'
 import { FIRST_CLICK_CONFIRM_DELAY_MS } from '@/lib/config'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
@@ -116,37 +119,38 @@ async function handleEvent(event: ReturnType<typeof resend.webhooks.verify>, svi
   const date = new Intl.DateTimeFormat('fr-FR', {
     day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris',
   }).format(noteDate)
+  const body = `${emoji} <b>${action} le ${date}</b><br><br><b>Sujet :</b> ${entry.sujet}<br><b>Commercial :</b> ${entry.commercial_name}`
 
-  try {
-    await logNoteHubSpot(
-      entry.contact_id,
-      `${emoji} <b>${action} le ${date}</b><br><br><b>Sujet :</b> ${entry.sujet}<br><b>Commercial :</b> ${entry.commercial_name}`
-    )
-    console.log('[WEBHOOK] Note HubSpot créée pour contact:', entry.contact_id)
-  } catch (e) {
-    // Libère le verrou : le prochain événement du même type pourra recréer la Note
-    await kv.del(`hubspot_note:${emailId}:${noteKind}`)
-    throw e
+  if (entry.contact_id) {
+    try {
+      await createNote(entry.contact_id, body)
+      console.log('[WEBHOOK] Note HubSpot créée pour contact:', entry.contact_id)
+    } catch (e: any) {
+      // Verrou conservé (pas de Note en double) ; la Note est retentée par le cron, alerte si l'échec est définitif
+      console.error('[WEBHOOK] Note HubSpot non créée :', e.message)
+      await enqueueNote({ contactId: entry.contact_id, body, label: `${action} — « ${entry.sujet} » (${entry.commercial_name})`, firstError: e.message })
+    }
   }
+
+  // Premier clic humain : DM au commercial, une seule fois par envoi
+  if (noteKind === 'clicked') await notifyFirstClick(emailId, entry, noteDate)
 }
 
-async function logNoteHubSpot(contactId: string, body: string) {
-  const res = await fetch('https://api.hubapi.com/crm/v3/objects/notes', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.HUBSPOT_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      properties: {
-        hs_timestamp: new Date().toISOString(),
-        hs_note_body: body,
-      },
-      associations: [{
-        to: { id: parseInt(contactId) },
-        types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 202 }],
-      }],
-    }),
-  })
-  if (!res.ok) throw new Error(`HubSpot note error: ${await res.text()}`)
+// DM Slack « le PS vient de cliquer » au commercial : une seule fois par envoi (click_notified_at),
+// jamais pour un clic automatique (appelé après la confirmation du premier clic humain).
+async function notifyFirstClick(emailId: string, entry: Record<string, any>, clickedAt: Date) {
+  if (!entry.commercial_slack_id) return
+  if (!(await markOnce(emailId, 'click_notified_at'))) return
+  const heure = new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' }).format(clickedAt)
+  const relance = entry.kind === 'relance' ? ' (ta relance)' : ''
+  const text = `*🖱️ ${entry.ps_nom} vient de cliquer dans ton mail${relance}*\n` +
+    `« ${entry.sujet} » — formation ${entry.formation_nom}, à ${heure}.\n` +
+    `C'est le bon moment pour l'appeler.\n` +
+    (entry.contact_id ? `👉 Fiche HubSpot : ${hubspotContactUrl(entry.contact_id)}` : '')
+  try {
+    await sendSlackDM(entry.commercial_slack_id, text)
+    console.log('[WEBHOOK] DM premier clic envoyé :', emailId)
+  } catch (e: any) {
+    console.error('[WEBHOOK] DM premier clic non envoyé :', emailId, e.message)
+  }
 }

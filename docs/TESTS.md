@@ -209,6 +209,27 @@ Données : `seed --relance --names --purge` (envois au PS de test au nom de « C
 | K11 | Connexion Google réelle (déconnexion puis « Se connecter avec Google ») | retour sur `/`, session créée |
 | K12 | Performance en mode production local (`npm run build` puis `npm run start`) | sessions, formations et recherche de contact < 500 ms (cache chaud) |
 
+### L. Relances, DM et alertes (lot 3)
+
+Données : `seed --relances` (envois de la fiche Dethie Faye, relance J+3 due : non ouvert il y a 2 jours, ouvert, cliqué, adresse invalide, indésirable, déjà relancé, sans Slack ; un envoi de « Zacharie » sans échéance ; une ancienne relance `legacy:`). **Avant chaque appel du cron : `check-slack`.** Sujets d'envoi réel tous distincts (`[TEST-L3-A]`, `[TEST-L3-B]`…).
+
+| # | Étapes | Attendu |
+|---|---|---|
+| L0 | Tests Node de `renderMail` (19 cas) | échappement, liens Markdown et URL sans lien imbriqué, ponctuation finale exclue, parenthèses, texte brut |
+| L1 | Recherche de contact (étape 4) | première liste affichée dès la première passe, contacts supplémentaires ajoutés à la suite, ordre conservé, sélection conservée |
+| L2 | Rôle lecteur (`ADMIN_EMAILS` vidé + email de la fiche changé temporairement par le connecteur Airtable) | accueil « pas associé à une fiche commercial » ; `/suivi` lisible, « Relancer » désactivé (« Ton compte ne permet pas… ») ; generate, send, relance (préparer, rédiger, envoyer) → 403 — **tout remettre, relire la fiche, vérifier le diff** |
+| L3 | `GET /api/relance?id=` sur non ouvert / ouvert / cliqué | objet « Relance : votre formation … », introduction propre à chaque statut, mail d'origine sous « Mon précédent message » |
+| L4 | Adresse invalide, indésirable, déjà relancé, inconnu | 409 / 409 / 409 / 404, messages lisibles |
+| L5 | Corps d'origine supprimé (`email_body`) et absent chez Resend | `corpsOrigineManquant: true`, brouillon sans corps d'origine |
+| L6 | Administrateur sur un mail de Zacharie (**préparation seule**) ; même mail en rôle commercial | 200 « au nom de Zacharie » ; 403 « Seul le commercial qui a envoyé ce mail… » (préparer et envoyer) |
+| L7 | Envoi réel `[TEST-L3-A]`, `opened`, puis `/suivi?relance={id}` | fenêtre ouverte directement, pré-remplie « ouvert, sans clic » ; « Rédiger avec Claude » remplace le texte |
+| L8 | Objet préfixé `[TEST-L3-B]`, « Envoyer la relance » | 200 `in_reply_to: true` ; KV : `relance_id` sur l'origine, relance `kind: relance` + `parent_id`, origine retirée de `relances_due`, `relance_sent` +1 ; Gmail (source) : `In-Reply-To` = `References` = Message-ID de l'origine (Resend), multipart avec texte brut |
+| L9 | Rejeu même clé ; autre clé ; nouvelle préparation | rejeu 200 `replay: true` même relance ; 409 ; 409 ; `/suivi` : « Relancé », relance sous le mail, plus de bouton |
+| L10 | Cron (×2) | 1er : `notified: 4` (rattrapage compris), `skipped` adresse invalide / indésirable / relance mail = 1, 1 erreur « pas d'identifiant Slack » → DM d'alerte ; 2e : rien. DM reçus par le testeur seul, avec statut et lien `/suivi?relance=` |
+| L11 | Clic humain, 2e clic, rafale sur un autre envoi | 1 seul DM « vient de cliquer » ; aucun pour le 2e clic ni la rafale |
+| L12 | `HUBSPOT_TOKEN` faussé : 2 Notes en échec, cron avec échéance forcée ×3 ; jeton restauré, cron | file `hubspot_retry` (essais 1 → 3) ; 4e essai : Note abandonnée + DM « échec définitif » + récapitulatif ; après restauration : Note créée, file vide — **SHA-256 de `.env.local` identique** |
+| L13 | Performance (production locale) | première passe de recherche ~280–330 ms côté API ; premier résultat affiché ~780–1 040 ms après la frappe (dont 350 ms d'attente de frappe) |
+
 ### G. Non-régression complète
 
 Connexion Google → génération → envoi → `opened` → `clicked` → `/suivi` (statut « Cliqué », dates) → déconnexion.

@@ -1,148 +1,191 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { isPsInscritAFormation } from '@/lib/airtable'
 import { getKv, kvConfigured } from '@/lib/kv'
-import { purgeExpired } from '@/lib/tracking'
-import { RETENTION_DAYS } from '@/lib/config'
+import { KEYS } from '@/lib/kv-schema'
+import { markOnce, purgeExpired } from '@/lib/tracking'
+import { RETENTION_DAYS, SLACK_RELANCE_MAX_ATTEMPTS } from '@/lib/config'
+import { RELANCE_STATUS_LABEL, relanceStatus } from '@/lib/relance'
+import { processNoteRetries } from '@/lib/note-queue'
+import { appUrl, hubspotContactUrl, sendAlert, sendSlackDM } from '@/lib/slack'
 
+export const dynamic = 'force-dynamic'
+
+// Passage quotidien (Vercel Cron, 8h UTC) :
+//   1. relances J+3 par DM Slack (relances_due, rattrapage des jours manqués)
+//   2. purge RGPD
+//   3. nouveaux essais des Notes HubSpot en échec
+//   4. alerte en DM (ALERT_SLACK_USER_ID) s'il y a eu des erreurs
 export async function GET(req: NextRequest) {
-  // Verify cron secret. Sans CRON_SECRET, la valeur attendue deviendrait
-  // "Bearer undefined" : n'importe qui pourrait déclencher le cron.
+  // Sans CRON_SECRET, la valeur attendue deviendrait "Bearer undefined" :
+  // n'importe qui pourrait déclencher le cron.
   if (!process.env.CRON_SECRET) {
     console.error('[CRON] CRON_SECRET manquant — exécution refusée')
     return NextResponse.json({ error: 'Configuration serveur invalide (CRON_SECRET manquant)' }, { status: 500 })
   }
-  const auth = req.headers.get('authorization')
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (req.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
-
-  const today = new Date().toISOString().split('T')[0]
-  let notified = 0
-  let purged = 0
-  let errors: string[] = []
-
-  try {
-    if (!kvConfigured()) {
-      return NextResponse.json({ message: 'KV non configuré — relances désactivées' })
-    }
-
-    const kv = getKv()
-
-    // Scan all relance keys
-    const keys = await kv.keys('relance:*')
-
-    for (const key of keys) {
-      const item = await kv.get<any>(key)
-      if (!item || item.relance_at !== today) continue
-
-      // Send Slack DM to the commercial
-      // Vérifier si le PS est déjà inscrit dans Airtable
-      try {
-        let dejaInscrit = false
-        try {
-          dejaInscrit = await isPsInscritAFormation(item.ps_rpps, item.ps_email, item.formation_numero)
-        } catch (e: any) {
-          // Airtable indisponible : on relance quand même (mieux vaut trop que pas assez),
-          // mais l'erreur est tracée au lieu d'être avalée.
-          console.error('[CRON] Vérification inscription impossible pour', key, ':', e.message)
-          errors.push(`${key}: vérification inscription impossible (${e.message}) — relance envoyée quand même`)
-        }
-        if (dejaInscrit) {
-          await kv.del(key) // Supprimer silencieusement — plus besoin de relancer
-          continue
-        }
-
-        if (!item.commercial_slack_id) {
-          errors.push(`${key}: slack_user_id manquant pour ${item.commercial_name}`)
-          continue
-        }
-
-        const slackMsg = buildSlackMessage(item)
-        await sendSlackDM(item.commercial_slack_id, slackMsg)
-        await kv.del(key)
-        notified++
-      } catch (e: any) {
-        errors.push(`${key}: ${e.message}`)
-      }
-    }
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 })
+  if (!kvConfigured()) {
+    return NextResponse.json({ message: 'KV non configuré — relances désactivées' })
   }
 
-  // Rétention RGPD : purge des envois de plus de RETENTION_DAYS jours (indépendante des relances)
+  const report = {
+    date: new Date().toISOString().split('T')[0],
+    notified: 0,
+    skipped: { inscrit: 0, adresse_invalide: 0, indesirable: 0, relance_mail: 0, introuvable: 0 },
+    retried: 0,
+    purged: 0,
+    notes: { created: 0, requeued: 0, abandoned: 0 },
+    errors: [] as string[],
+  }
+
   try {
-    purged = await purgeExpired()
-    if (purged) console.log(`[CRON] Purge RGPD : ${purged} envoi(s) de plus de ${RETENTION_DAYS} jours supprimé(s)`)
+    await processDueRelances(report)
+  } catch (e: any) {
+    console.error('[CRON] Relances en échec :', e.message)
+    report.errors.push(`relances : ${e.message}`)
+  }
+
+  // Rétention RGPD : purge des envois de plus de RETENTION_DAYS jours
+  try {
+    report.purged = await purgeExpired()
+    if (report.purged) console.log(`[CRON] Purge RGPD : ${report.purged} envoi(s) de plus de ${RETENTION_DAYS} jours supprimé(s)`)
   } catch (e: any) {
     console.error('[CRON] Purge RGPD en échec:', e.message)
-    errors.push(`purge RGPD: ${e.message}`)
+    report.errors.push(`purge RGPD : ${e.message}`)
   }
 
-  return NextResponse.json({ date: today, notified, purged, errors })
-}
-
-function buildSlackMessage(item: any): string {
-  return `*📬 Relance à faire : ${item.ps_nom}*
-
-Tu avais envoyé un mail le ${formatDate(item.sent_at)} à *${item.ps_nom}* pour la formation *"${item.formation_nom}"* (N° ${item.formation_numero}).
-
-Il ne s'est pas encore inscrit. Voici un mail de relance prêt à envoyer :
-
----
-*Sujet :* Re: ${item.sujet}
-
-Bonjour ${item.ps_nom},
-
-Je me permets de reprendre contact suite à mon message de ${daysAgo(item.sent_at)}.
-
-La formation "${item.formation_nom}" est toujours disponible et intégralement prise en charge par l'ANDPC. Si vous avez des questions sur le processus d'inscription ou souhaitez que je vous guide, n'hésitez pas à me contacter.
-
-À très vite,
-${item.commercial_name}
----
-
-👉 Fiche HubSpot : https://app-eu1.hubspot.com/contacts/26228968/contacts/${item.ps_hubspot_id}`
-}
-
-function formatDate(iso: string): string {
+  // Notes HubSpot en échec (l'alerte d'un échec définitif part depuis processNoteRetries)
   try {
-    return new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long' }).format(new Date(iso))
-  } catch { return iso }
-}
-
-function daysAgo(iso: string): string {
-  try {
-    const days = Math.round((Date.now() - new Date(iso).getTime()) / 86400000)
-    return `il y a ${days} jour${days > 1 ? 's' : ''}`
-  } catch { return 'récemment' }
-}
-
-async function sendSlackDM(userId: string, text: string) {
-  if (!process.env.SLACK_BOT_TOKEN) throw new Error('SLACK_BOT_TOKEN manquant')
-
-  const headers = {
-    Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`,
-    'Content-Type': 'application/json',
+    const notes = await processNoteRetries()
+    report.notes = { created: notes.created, requeued: notes.requeued, abandoned: notes.abandoned }
+    report.errors.push(...notes.errors)
+  } catch (e: any) {
+    console.error('[CRON] Nouveaux essais des Notes en échec :', e.message)
+    report.errors.push(`Notes HubSpot : ${e.message}`)
   }
 
-  // Étape 1 : ouvrir (ou récupérer) le canal DM
-  // conversations.open crée le canal si besoin — aucune action requise du commercial
-  const openRes = await fetch('https://slack.com/api/conversations.open', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ users: userId }),
-  })
-  const openData = await openRes.json()
-  if (!openData.ok) throw new Error(`Slack conversations.open error: ${openData.error}`)
+  if (report.errors.length) {
+    await sendAlert(`passage quotidien du ${report.date} : ${report.errors.length} erreur(s)`, report.errors)
+  }
+  return NextResponse.json(report)
+}
 
-  const channelId = openData.channel.id
+type Report = {
+  notified: number
+  skipped: Record<'inscrit' | 'adresse_invalide' | 'indesirable' | 'relance_mail' | 'introuvable', number>
+  retried: number
+  errors: string[]
+}
 
-  // Étape 2 : envoyer le message dans ce canal DM
-  const msgRes = await fetch('https://slack.com/api/chat.postMessage', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ channel: channelId, text, mrkdwn: true }),
-  })
-  const msgData = await msgRes.json()
-  if (!msgData.ok) throw new Error(`Slack chat.postMessage error: ${msgData.error}`)
+// Relances dont l'échéance est passée (aujourd'hui ou un jour manqué). Chaque relance est
+// « réclamée » par ZREM : deux passages simultanés n'envoient jamais deux DM.
+async function processDueRelances(report: Report) {
+  const kv = getKv()
+  const due = (await kv.zrange(KEYS.relancesDue, 0, Date.now(), { byScore: true })) as string[]
+  for (const member of due) {
+    if (Number(await kv.zrem(KEYS.relancesDue, member)) !== 1) continue
+    try {
+      if (member.startsWith('legacy:')) await handleLegacy(member, report)
+      else await handleEntry(member, report)
+    } catch (e: any) {
+      console.error('[CRON] Relance', member, ':', e.message)
+      report.errors.push(`relance ${member} : ${e.message}`)
+    }
+  }
+}
+
+function frenchDate(iso: string): string {
+  try {
+    return new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', timeZone: 'Europe/Paris' }).format(new Date(iso))
+  } catch {
+    return iso
+  }
+}
+
+// Le PS est-il inscrit ? Airtable indisponible : la relance part quand même (mieux vaut trop
+// que pas assez), l'erreur est remontée dans l'alerte.
+async function inscrit(member: string, rpps: string, email: string, numero: string, report: Report): Promise<boolean> {
+  try {
+    return await isPsInscritAFormation(rpps || '', email || '', numero || '')
+  } catch (e: any) {
+    report.errors.push(`${member} : vérification de l'inscription impossible (${e.message}) — relance envoyée quand même`)
+    return false
+  }
+}
+
+// Slack en échec : nouvel essai au prochain passage, jusqu'à SLACK_RELANCE_MAX_ATTEMPTS
+async function retryLater(member: string, error: string, report: Report) {
+  const kv = getKv()
+  const attempts = await kv.incr(`slack_relance_attempts:${member}`)
+  await kv.expire(`slack_relance_attempts:${member}`, 7 * 86400)
+  if (attempts < SLACK_RELANCE_MAX_ATTEMPTS) {
+    await kv.zadd(KEYS.relancesDue, { score: Date.now() + 86400000, member })
+    report.retried++
+    report.errors.push(`${member} : DM Slack non envoyé (${error}) — nouvel essai demain (${attempts}/${SLACK_RELANCE_MAX_ATTEMPTS})`)
+  } else {
+    report.errors.push(`${member} : DM Slack abandonné après ${attempts} essais (${error})`)
+  }
+}
+
+async function handleEntry(id: string, report: Report) {
+  const entry = await getKv().get<Record<string, any>>(KEYS.track(id))
+  if (!entry) { report.skipped.introuvable++; return }
+  if (entry.relance_id) { report.skipped.relance_mail++; return }
+  if (entry.statut === 'bounce') { report.skipped.adresse_invalide++; return }
+  if (entry.statut === 'plainte') { report.skipped.indesirable++; return }
+  if (await inscrit(id, entry.ps_rpps, entry.ps_email, entry.formation_numero, report)) { report.skipped.inscrit++; return }
+  if (!entry.commercial_slack_id) {
+    report.errors.push(`${id} : pas d'identifiant Slack pour ${entry.commercial_name} — relance de ${entry.ps_nom} non notifiée`)
+    return
+  }
+
+  const statut = relanceStatus(entry)
+  const constat = {
+    non_ouvert: "Il ne l'a pas encore ouvert.",
+    ouvert_sans_clic: "Il l'a ouvert, sans cliquer.",
+    clique: 'Il a cliqué dans le mail.',
+  }[statut]
+  const text = `*📬 Relance à faire : ${entry.ps_nom}*\n` +
+    `Tu lui as envoyé un mail le ${frenchDate(entry.sent_at)} pour la formation *« ${entry.formation_nom} »*.\n` +
+    `Statut : *${RELANCE_STATUS_LABEL[statut]}*. ${constat} Il ne s'est pas encore inscrit.\n` +
+    `👉 <${appUrl()}/suivi?relance=${encodeURIComponent(id)}|Préparer la relance par mail>\n` +
+    (entry.contact_id ? `👉 Fiche HubSpot : ${hubspotContactUrl(entry.contact_id)}` : '')
+  try {
+    await sendSlackDM(entry.commercial_slack_id, text)
+  } catch (e: any) {
+    await retryLater(id, e.message, report)
+    return
+  }
+  await markOnce(id, 'slack_relance_at')
+  report.notified++
+}
+
+// Ancienne clé relance:{ts} non rattachée à un envoi (reprise par la migration)
+async function handleLegacy(member: string, report: Report) {
+  const kv = getKv()
+  const key = member.slice('legacy:'.length)
+  const item = await kv.get<Record<string, any>>(key)
+  if (!item) { report.skipped.introuvable++; return }
+  if (await inscrit(member, item.ps_rpps, item.ps_email, item.formation_numero, report)) {
+    await kv.del(key)
+    report.skipped.inscrit++
+    return
+  }
+  if (!item.commercial_slack_id) {
+    report.errors.push(`${member} : pas d'identifiant Slack pour ${item.commercial_name} — relance de ${item.ps_nom} non notifiée`)
+    return
+  }
+  const text = `*📬 Relance à faire : ${item.ps_nom}*\n` +
+    `Tu lui as envoyé un mail le ${frenchDate(item.sent_at)} pour la formation *« ${item.formation_nom} »*. Il ne s'est pas encore inscrit.\n` +
+    `👉 <${appUrl()}/suivi|Voir le suivi des envois>\n` +
+    (item.ps_hubspot_id ? `👉 Fiche HubSpot : ${hubspotContactUrl(item.ps_hubspot_id)}` : '')
+  try {
+    await sendSlackDM(item.commercial_slack_id, text)
+  } catch (e: any) {
+    await retryLater(member, e.message, report)
+    return
+  }
+  await kv.del(key)
+  report.notified++
 }

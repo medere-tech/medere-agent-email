@@ -120,3 +120,52 @@ function formatDate(dateStr: string): string {
     return dateStr
   }
 }
+export interface GenerateRelanceParams {
+  commercial: { name: string; email: string; phone?: string }
+  ps: { titre: string; nom: string }
+  formationNom: string
+  statut: 'non_ouvert' | 'ouvert_sans_clic' | 'clique'
+  sentAt: string
+  originalBody: string | null
+}
+
+// Relance d'un mail déjà envoyé : courte, adaptée au statut, suivie du rappel du mail d'origine.
+export async function generateRelance(params: GenerateRelanceParams): Promise<string> {
+  const { commercial, ps, formationNom, statut, sentAt, originalBody } = params
+  const situation = {
+    non_ouvert: "Le PS n'a pas ouvert le premier mail : rappeler brièvement l'essentiel et donner envie de l'ouvrir.",
+    ouvert_sans_clic: "Le PS a ouvert le premier mail mais n'a cliqué sur aucun lien : proposer de l'aide pour l'inscription (par téléphone) et lever les freins.",
+    clique: "Le PS a cliqué dans le premier mail sans que l'on sache s'il s'est inscrit : proposer de l'accompagner pour finaliser.",
+  }[statut]
+
+  const prompt = `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.
+Rédige une RELANCE courte (5 à 8 lignes avant la signature) pour un professionnel de santé qui a reçu un premier mail.
+
+CONTEXTE :
+- Commercial : ${commercial.name} (${commercial.email})
+- PS : ${ps.titre} ${ps.nom}
+- Formation : "${formationNom}"
+- Premier mail envoyé le : ${sentAt.slice(0, 10)}
+- Situation : ${situation}
+
+STYLE :
+- Commence par "Bonjour ${ps.titre} ${ps.nom}," (ou "Bonjour," si le nom manque)
+- Ton professionnel, chaleureux, jamais insistant
+- Rappelle que la formation est intégralement prise en charge par l'ANDPC
+- Termine par la signature : ${commercial.name}${commercial.phone ? `, ${commercial.phone}` : ''}
+- Tirets courts (-) uniquement, jamais de tirets longs
+- Texte brut, sans HTML ni Markdown
+
+${originalBody ? `Après la signature, ajoute exactement la ligne "----- Mon précédent message -----", une ligne vide, puis le premier mail recopié tel quel :\n\n${originalBody}` : "Le premier mail n'est plus disponible : n'y fais pas référence en détail."}
+
+Réponds UNIQUEMENT avec le texte complet de la relance.`
+
+  const msg = await client.messages.create({
+    model: 'claude-opus-4-6',
+    max_tokens: 2500,
+    messages: [{ role: 'user', content: prompt }],
+  })
+  const text = msg.content[0]?.type === 'text' ? msg.content[0].text.trim() : ''
+  if (!text) throw new Error('Relance vide')
+  return text
+}

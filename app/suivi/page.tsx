@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
+import RelancePanel from '@/components/RelancePanel'
 
 interface EmailEntry {
   resend_id: string
@@ -15,6 +16,11 @@ interface EmailEntry {
   sent_at: string
   opened_at: string | null
   clicked_at: string | null
+  // Relance par mail rattachée à ce mail (null s'il n'y en a pas)
+  relance?: { resend_id: string; statut: EmailEntry['statut']; sent_at: string; opened_at: string | null; clicked_at: string | null; sent_by_name: string | null } | null
+  // Relance possible pour la personne connectée ; sinon, la raison
+  relance_possible?: boolean
+  relance_bloquee?: string | null
 }
 
 interface Stats {
@@ -190,6 +196,17 @@ export default function SuiviPage() {
   const [page, setPage] = useState(1)
   const [error, setError] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
+  // Fenêtre de relance ouverte (identifiant du mail d'origine) ; ?relance=… l'ouvre directement (lien du DM Slack)
+  const [relanceId, setRelanceId] = useState<string | null>(null)
+  useEffect(() => {
+    const fromUrl = new URLSearchParams(window.location.search).get('relance')
+    if (fromUrl) setRelanceId(fromUrl)
+  }, [])
+  const closeRelance = () => {
+    setRelanceId(null)
+    const url = new URL(window.location.href)
+    if (url.searchParams.has('relance')) { url.searchParams.delete('relance'); window.history.replaceState(null, '', url.toString()) }
+  }
 
   const fetchData = useCallback(async (p: number, silent = false) => {
     silent ? setRefreshing(true) : setLoading(true)
@@ -374,6 +391,7 @@ export default function SuiviPage() {
                             </td>
                             <td className="px-4 py-3">
                               <StatutBadge statut={email.statut} />
+                              {email.relance && <div className="text-[11px] text-zinc-500 mt-1">Relancé {formatRelative(email.relance.sent_at)}</div>}
                             </td>
                             <td className="hidden sm:table-cell px-4 py-3">
                                 <span className="text-xs text-zinc-500" title={formatFull(email.sent_at)}>
@@ -444,6 +462,27 @@ export default function SuiviPage() {
                                     <div className="font-mono text-zinc-400 text-[10px] break-all">{email.resend_id}</div>
                                   </div>
                                 </div>
+                                <div className="mt-4 pt-3 border-t border-zinc-200 text-xs">
+                                  <div className="text-zinc-400 mb-1.5 font-medium">Relance</div>
+                                  {email.relance ? (
+                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-700">
+                                      <span className="flex items-center gap-1.5"><Icons.Send /> Relance envoyée le {formatFull(email.relance.sent_at)}</span>
+                                      <StatutBadge statut={email.relance.statut} />
+                                      {email.relance.sent_by_name && <span className="text-zinc-500">par {email.relance.sent_by_name}</span>}
+                                    </div>
+                                  ) : (
+                                    <div className="flex flex-wrap items-center gap-3">
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); setRelanceId(email.resend_id) }}
+                                        disabled={!email.relance_possible}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 text-white font-medium rounded-lg hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
+                                      >
+                                        <Icons.Send /> Relancer
+                                      </button>
+                                      {!email.relance_possible && email.relance_bloquee && <span className="text-zinc-500">{email.relance_bloquee}</span>}
+                                    </div>
+                                  )}
+                                </div>
                               </td>
                             </tr>
                           )}
@@ -500,6 +539,10 @@ export default function SuiviPage() {
             </>
           )}
         </div>
+
+        {relanceId && (
+          <RelancePanel id={relanceId} onClose={closeRelance} onSent={() => fetchData(page, true)} />
+        )}
 
         <div className="mt-4 text-center text-xs text-zinc-400">
           Mise à jour automatique toutes les minutes ·{' '}

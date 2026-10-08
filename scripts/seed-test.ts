@@ -2,7 +2,7 @@
  * Données de test pour l'Agent Mail DPC — base KV de TEST uniquement.
  *
  * Usage (Node ≥ 22.18, exécute le TypeScript sans dépendance) :
- *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks] [--purge]
+ *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks] [--purge] [--relances]
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts webhook <type> <email_id> [--created-at=<iso>] [--message-id=<id>] [--svix-id=<suffixe>]
  *       type : delivered | bounced | complained | opened | clicked
  *       --created-at : date de l'événement (défaut : maintenant)
@@ -30,6 +30,9 @@
  *   email_track:test-purge-*         (--purge) envois au PS de test au nom de Zacharie / Kaoufer (adresse seule)
  *   email_track:test-autre-ps-*      (--purge) envois à un PS fictif (99999999999) qui doivent rester intacts
  *   relance:test-purge-zacharie / relance:test-autre-ps   (--purge) anciennes relances (PS de test / autre PS)
+ *   email_track:test-rel-*           (--relances) envois de la fiche Dethie Faye, relance J+3 due (non ouvert il y a 2 jours,
+ *                                    ouvert, cliqué, adresse invalide, indésirable, déjà relancé, sans Slack) + un envoi
+ *                                    de « Zacharie » sans échéance (refus de relance) ; relance:test-rel-legacy (legacy)
  *   emails_index                     + les ids ci-dessus
  *   relance:test-seed-today          (--relance) relance du jour, rattachable à test-seed-envoye
  *   relance:test-seed-orphan         (--relance) relance sans envoi correspondant (reprise en legacy)
@@ -46,8 +49,10 @@ const CLICK_IDS = ['test-click-a', 'test-click-b', 'test-click-c']
 // --purge : envois au PS de test au nom de vrais commerciaux (à purger) et envois à un PS fictif (à garder)
 const PURGE_IDS = ['test-purge-zacharie', 'test-purge-kaoufer-email', 'test-autre-ps-zacharie', 'test-autre-ps-sarah']
 const OTHER_PS = { contact_id: '99999999999', ps_email: 'ps.fictif@example.invalid', ps_nom: 'Docteur PS Fictif' }
-const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS]
-const RELANCE_KEYS = ['relance:test-seed-today', 'relance:test-seed-orphan', 'relance:test-purge-zacharie', 'relance:test-autre-ps']
+// --relances : envois de la fiche de test (Dethie Faye) avec relance J+3 due, statuts variés
+const RELANCE_IDS = ['test-rel-non-ouvert', 'test-rel-ouvert', 'test-rel-clique', 'test-rel-bounce', 'test-rel-plainte', 'test-rel-deja', 'test-rel-sans-slack', 'test-rel-zacharie']
+const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS, ...RELANCE_IDS]
+const RELANCE_KEYS = ['relance:test-seed-today', 'relance:test-seed-orphan', 'relance:test-purge-zacharie', 'relance:test-autre-ps', 'relance:test-rel-legacy']
 const SEED_COMMERCIAL_KEYS = ['nom:commercial-de-test', 'kaoufer@medere.fr', 'nom:loane-deluge', 'zacharie@medere.fr', 'sarah.s@medere.fr']
 const WEBHOOK_PREFIX = 'msg_seedtest_'
 const WEBHOOK_TYPES = ['delivered', 'bounced', 'complained', 'opened', 'clicked']
@@ -113,7 +118,7 @@ async function scan(pattern: string): Promise<string[]> {
   return keys
 }
 
-async function seed(withRelance: boolean, withNames: boolean, withClicks: boolean, withPurge: boolean): Promise<void> {
+async function seed(withRelance: boolean, withNames: boolean, withClicks: boolean, withPurge: boolean, withRelances: boolean): Promise<void> {
   const contactId = required('TEST_HUBSPOT_CONTACT_ID')
   const psEmail = required('TEST_PS_EMAIL')
   const now = new Date()
@@ -166,6 +171,45 @@ async function seed(withRelance: boolean, withNames: boolean, withClicks: boolea
       await kv('ZADD', 'emails_index', Date.parse(sentAt), id)
       ids.push(id)
     }
+  }
+
+  if (withRelances) {
+    // Fiche de test Dethie Faye ; tous les identifiants Slack sont TEST_SLACK_USER_ID
+    const slackId = required('TEST_SLACK_USER_ID')
+    const today = iso.split('T')[0]
+    const dayMs = (d: string) => Date.parse(`${d}T00:00:00Z`)
+    const minus = (n: number) => new Date(now.getTime() - n * 86400000).toISOString().split('T')[0]
+    const common = {
+      ...base, ps_nom: 'Monsieur Dethie Faye', ps_titre: 'Monsieur', ps_lastname: 'Faye', ps_rpps: '',
+      commercial_name: 'Dethie Faye', commercial_email: 'dethie@medere.fr', commercial_key: 'dethie@medere.fr',
+      commercial_slack_id: slackId, commercial_hubspot_id: '176772849', kind: 'initial',
+      formation_nom: 'Formation de test', formation_numero: '00000000000', opened_at: null, clicked_at: null,
+    }
+    const t = (n: number) => new Date(now.getTime() - n * 86400000).toISOString()
+    const cases: [string, Record<string, unknown>, string | null][] = [
+      ['test-rel-non-ouvert', { statut: 'délivré', sent_at: t(5), delivered_at: t(5) }, minus(2)],
+      ['test-rel-ouvert', { statut: 'ouvert', sent_at: t(3), first_opened_at: t(3), opened_at: t(3) }, today],
+      ['test-rel-clique', { statut: 'cliqué', sent_at: t(3), first_opened_at: t(3), opened_at: t(3), first_clicked_at: t(3), clicked_at: t(3) }, today],
+      ['test-rel-bounce', { statut: 'bounce', sent_at: t(3), bounced_at: t(3) }, today],
+      ['test-rel-plainte', { statut: 'plainte', sent_at: t(3), complained_at: t(3) }, today],
+      ['test-rel-deja', { statut: 'ouvert', sent_at: t(3), first_opened_at: t(3), relance_id: 'test-rel-deja-relance' }, today],
+      ['test-rel-sans-slack', { statut: 'délivré', sent_at: t(3), commercial_slack_id: '' }, today],
+      // Auteur Zacharie (refus de relance pour un non-auteur) : jamais d'échéance, Slack de test
+      ['test-rel-zacharie', { statut: 'ouvert', sent_at: t(3), first_opened_at: t(3), commercial_name: 'Zacharie Groch', commercial_email: 'zacharie@medere.fr', commercial_key: 'zacharie@medere.fr' }, null],
+    ]
+    for (const [id, over, due] of cases) {
+      await kv('SET', `email_track:${id}`, JSON.stringify({ ...common, sujet: `[TEST-SEED] relance ${id.replace('test-rel-', '')}`, ...over }))
+      await kv('SET', `email_body:${id}`, JSON.stringify({ corps: `Bonjour Monsieur Faye,\n\n[TEST-SEED] corps d'origine de ${id}.\nInscription : www.agencedpc.fr/professionnel/.\n\nDethie Faye` }), 'EX', 7 * 86400)
+      await kv('ZADD', 'emails_index', Date.parse(String(over.sent_at)), id)
+      if (due) await kv('ZADD', 'relances_due', dayMs(due), id)
+      ids.push(id)
+    }
+    await kv('SET', 'relance:test-rel-legacy', JSON.stringify({
+      commercial_slack_id: slackId, commercial_name: 'Dethie Faye', ps_nom: 'Monsieur Dethie Faye', ps_email: psEmail,
+      ps_rpps: '', ps_hubspot_id: contactId, formation_nom: 'Formation de test', formation_numero: '00000000000',
+      sujet: '[TEST-SEED] relance legacy', corps: 'x', sent_at: t(3), relance_at: today,
+    }), 'EX', 2 * 86400)
+    await kv('ZADD', 'relances_due', dayMs(today), 'legacy:relance:test-rel-legacy')
   }
 
   if (withPurge) {
@@ -318,7 +362,7 @@ async function checkSlack(): Promise<void> {
 async function main(): Promise<void> {
   assertTestKv()
   const [cmd = 'seed', ...args] = process.argv.slice(2)
-  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'), args.includes('--clicks'), args.includes('--purge'))
+  if (cmd === 'seed') return seed(args.includes('--relance'), args.includes('--names'), args.includes('--clicks'), args.includes('--purge'), args.includes('--relances'))
   if (cmd === 'webhook') return webhook(args[0], args[1], args.slice(2))
   if (cmd === 'clean') return clean()
   if (cmd === 'check-slack') return checkSlack()

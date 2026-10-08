@@ -16,7 +16,7 @@ Créé par [Déthié](https://dethie.fr/blog/) · Copyright © 2026 Médéré ·
 6. [Authentification](#authentification)
 7. [Airtable — Formations et Sessions](#airtable--formations-et-sessions)
 8. [Envoi des mails — idempotence et copie commerciale](#envoi-des-mails--idempotence-et-copie-commerciale)
-9. [Relances automatiques J+3](#relances-automatiques-j3)
+9. [Relances](#relances)
 10. [Suivi des envois et clés KV](#suivi-des-envois-et-clés-kv)
 11. [Webhooks Resend](#webhooks-resend)
 12. [HubSpot — Logging des emails](#hubspot--logging-des-emails)
@@ -81,16 +81,23 @@ medere-agent-email/
 │       ├── sessions/route.ts             # Sessions par formation
 │       ├── contact-search/route.ts       # Recherche contacts HubSpot (502 si HubSpot indisponible)
 │       ├── generate/route.ts             # Génération mail via Claude (+ upsell)
-│       ├── send/route.ts                 # Envoi via Resend, tracking KV, Note HubSpot, relance
+│       ├── send/route.ts                 # Envoi (contrôles) → lib/deliver.ts
+│       ├── relance/route.ts              # Brouillon de relance (GET), generate/ (Claude), send/ (envoi dans le fil)
 │       ├── suivi/route.ts                # API lecture KV pour page suivi
 │       ├── cron/
 │       │   └── relance/route.ts          # Cron job relances J+3
 │       └── webhooks/
 │           └── resend/route.ts           # Webhooks tracking email (ouvert/cliqué)
 ├── components/
-│   └── AgentMail.tsx                     # Composant principal (6 étapes)
+│   ├── AgentMail.tsx                     # Composant principal (6 étapes)
+│   └── RelancePanel.tsx                  # Fenêtre de relance par mail (/suivi)
 ├── lib/
 │   ├── airtable.ts                       # Fonctions Airtable
+│   ├── deliver.ts                        # Chaîne d'envoi commune (Resend, suivi, copie, Note, rejeu)
+│   ├── note-queue.ts                     # Notes HubSpot en échec : nouveaux essais, alerte
+│   ├── relance.ts                        # Règles et brouillon de la relance par mail
+│   ├── render-mail.ts                    # Rendu texte → HTML + texte brut (fonction pure)
+│   ├── slack.ts                          # DM Slack et alertes techniques
 │   ├── auth.ts                           # Session JWT (cookie)
 │   ├── claude.ts                         # Génération mail IA
 │   ├── config.ts                         # Constantes (RETENTION_DAYS, seuil des événements automatiques…)
@@ -277,7 +284,7 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 - **Fiches Commerciaux** : cache mémoire strict de 60 s (voir « Rôles et accès »).
 - La recherche Clients (une page) garde le cache Next de 60 s.
 - Le cron lit toujours Airtable sans cache (inscriptions et correspondance session → formation à jour).
-- Recherche de contact HubSpot : les passes de recherche (texte, texte sans accents, prénom + nom, mots séparés) partent **en parallèle** ; une réponse 429 de HubSpot est retentée jusqu'à 2 fois.
+- Recherche de contact HubSpot **progressive** : la première passe (la plus pertinente : email, RPPS ou recherche texte, `?part=first`) et les passes complémentaires (`?part=rest` : texte sans accents, prénom + nom, mots séparés, en parallèle) partent en même temps ; la première liste s'affiche dès son arrivée, les contacts supplémentaires sont **ajoutés à la suite** (aucun réordonnancement, la sélection en cours n'est pas touchée). « Aucun contact trouvé » n'apparaît qu'une fois toutes les passes terminées. Une réponse 429 de HubSpot est retentée jusqu'à 2 fois.
 
 ### Champs Airtable utilisés — Sessions
 
@@ -299,6 +306,13 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 
 ## Envoi des mails — idempotence et copie commerciale
 
+### Rendu du texte
+Une seule fonction, `renderMail` (`lib/render-mail.ts`, sans dépendance), produit le HTML **et** la version texte brut de chaque mail envoyé (envoi initial, relance, copie au commercial) :
+- le texte saisi est **échappé** (« < », « & »… ne cassent jamais le mail) ; retours à la ligne → `<br>` ;
+- liens Markdown `[texte](url)` → lien ; URL brutes (`http://`, `https://`, `www.`) → lien, **jamais à l'intérieur d'un lien déjà créé** ;
+- la ponctuation finale (`. , ; : ! ? » "`) et une parenthèse fermante non appariée sont **exclues** de l'URL (« … sur www.agencedpc.fr/professionnel/. » donne un lien valide) ;
+- version **texte brut** envoyée avec le HTML (`text`) : `[texte](url)` → « texte (url) ».
+
 ### Idempotence (pas de double envoi)
 - Une clé d'idempotence (UUID) est générée côté client à l'arrivée à l'étape 5 et envoyée avec la requête `/api/send`. Elle est réutilisée pour tout renvoi du même mail (double clic, timeout) et régénérée à chaque nouveau mail.
 - Elle est transmise à Resend (`idempotencyKey`) : un même envoi rejoué renvoie le même `email_id` sans nouveau mail. Un rejeu avec un contenu modifié est refusé (409 « déjà en cours d'envoi ou a déjà été envoyé »).
@@ -312,22 +326,39 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 
 ---
 
-## Relances automatiques J+3
+## Relances
 
-### Fonctionnement
-À chaque envoi, la relance est planifiée dans le même script atomique que le tracking :
-```
-relances_due   (sorted set)  membre = resend_id, score = jour d'échéance J+3 (heure de Paris) à 00:00 UTC
-email_track:{resend_id}      contient ce dont la relance a besoin : commercial_slack_id, ps_rpps, formation_numero, relance_due_day
-```
-Les anciennes clés `relance:{timestamp}` (avant la migration v2) sont reprises par `scripts/migrate-kv.ts` : rattachées à leur envoi quand c'est possible, sinon planifiées telles quelles (`legacy:relance:{timestamp}` dans `relances_due`).
+### Relance par mail depuis /suivi
+Dans le détail d'un mail, bouton **« Relancer »** (ou lien « Préparer la relance par mail » du DM J+3, qui ouvre `/suivi?relance={resend_id}`). La fenêtre de relance propose :
+- objet `Relance : votre formation {nom de la formation}` ;
+- texte pré-rempli : formule d'appel (« Bonjour {titre} {nom}, »), une introduction adaptée au statut — **non ouvert**, **ouvert sans clic** ou **cliqué** —, la signature, puis « ----- Mon précédent message ----- » et le mail d'origine ;
+- tout est modifiable, et **« Rédiger avec Claude »** régénère une relance adaptée au statut (même limite de débit que la génération) ;
+- corps d'origine : `email_body` (90 jours), sinon redemandé à Resend ; s'il n'est plus disponible, la relance s'ouvre **sans le corps d'origine** avec un message, à compléter ou à faire rédiger par Claude.
 
-> La lecture de `relances_due` par le cron (rattrapage, statut, lien vers la relance) arrive avec le lot 3 « Relances ». Le comportement décrit ci-dessous est celui du cron actuel, qui lit encore les clés `relance:*`.
+Règles (vérifiées côté serveur à la préparation **et** à l'envoi — `lib/relance.ts`) :
+- **une seule relance par mail** (verrou `relance_lock:{id}` + `relance_id` sur le mail d'origine) ; un double clic ou un rejeu de la même requête renvoie la même relance ;
+- seul **l'auteur** du mail peut relancer, ou un **administrateur** (la relance part alors au nom de l'auteur, avec `sent_by` et la mention dans la Note HubSpot) ;
+- impossible en cas d'**adresse invalide** ou de mail **signalé comme indésirable**, ou si le commercial du mail n'est plus actif ; le bouton est désactivé et la raison affichée.
 
-Le cron Vercel tourne tous les jours à 8h UTC (`0 8 * * *`). Pour chaque clé `relance:*` dont `relance_at === aujourd'hui` :
-1. Vérifie dans Airtable si le PS est déjà inscrit à une session de la formation (par RPPS ; sans RPPS, le RPPS est retrouvé via l'email dans la table Clients). Si oui → la clé est supprimée, pas de DM.
-2. Sinon → DM Slack au commercial, puis suppression de la clé.
-3. Si Airtable est indisponible, la relance part quand même (mieux vaut trop que pas assez) et l'erreur est remontée dans `errors[]` de la réponse et dans les logs.
+Envoi : **envoi complet** (même chaîne que l'envoi initial, `lib/deliver.ts` : idempotence, suivi KV, copie au commercial, Note HubSpot), dans le **fil du mail d'origine** : en-têtes `In-Reply-To` et `References` = Message-ID du mail d'origine. Ce Message-ID est celui fourni par Resend dans les webhooks (`message_id`, enregistré dans `email_track`), sinon demandé à l'API Resend (`GET /emails/{id}`). Outlook et Apple Mail regroupent la relance avec le mail d'origine ; **Gmail ne le fait pas** car il exige aussi un objet identique (l'objet « Relance : votre formation … » est un choix volontaire).
+
+Rattachement : la relance est une entrée `email_track` de `kind: 'relance'` avec `parent_id` ; le mail d'origine reçoit `relance_id` et `relance_sent_at`, et sort de `relances_due` (plus de DM J+3). La relance n'est pas dans `emails_index` (elle s'affiche sous le mail d'origine dans `/suivi`) mais dans `idx:commercial` / `idx:contact`. Ses compteurs sont **séparés** (`relance_sent`, `relance_opened`…), hors des taux principaux.
+
+### Relance J+3 par DM Slack
+À chaque envoi initial, la relance est planifiée dans `relances_due` (score = jour d'échéance J+3, heure de Paris, à 00:00 UTC). Le cron (`/api/cron/relance`, 8h UTC) traite **toutes** les relances dont l'échéance est passée — y compris les jours manqués (**rattrapage**). Chaque relance est « réclamée » par `ZREM` : deux passages simultanés n'envoient jamais deux DM.
+- **Pas de DM** si : une relance mail est déjà partie, adresse invalide, signalé comme indésirable, ou PS **inscrit** à une session de la formation (Airtable : par RPPS, sinon RPPS retrouvé par l'email dans Clients). Airtable indisponible : le DM part quand même et l'erreur est remontée dans l'alerte.
+- Le DM indique le **statut** (non ouvert / ouvert sans clic / cliqué) et contient le lien **« Préparer la relance par mail »** vers `/suivi?relance={resend_id}`, plus la fiche HubSpot. `slack_relance_at` est posé sur l'envoi.
+- Slack en échec : nouvel essai au passage suivant, jusqu'à 3 fois (`SLACK_RELANCE_MAX_ATTEMPTS`, compteur `slack_relance_attempts:{membre}`).
+- Commercial sans `slack_user_id` : pas de DM, erreur remontée dans l'alerte.
+- Anciennes clés `relance:{timestamp}` non rattachées (`legacy:relance:…` dans `relances_due`, voir la migration) : DM sans statut, avec un lien vers `/suivi`, puis la clé est supprimée.
+
+### DM au premier clic
+Au **premier clic humain** du PS (jamais pour un clic automatique), le commercial reçoit un DM « {PS} vient de cliquer dans ton mail … C'est le bon moment pour l'appeler. », **une seule fois par envoi** (`click_notified_at`). Il part après la confirmation du premier clic (3 secondes, voir « Ouvertures et clics automatiques »), en même temps que la Note HubSpot.
+
+### Alertes techniques
+DM Slack à `ALERT_SLACK_USER_ID` (`lib/config.ts`, actuellement `U05UVHGBURX`) :
+- **erreurs du passage quotidien** du cron (un message récapitulatif, avec le détail de chaque erreur) ;
+- **Note HubSpot en échec définitif** : toute Note en échec (envoi, relance, ouverture, clic) est mise dans la file `hubspot_retry` (+ `hubspot_retry:{id}`, 7 jours) ; le cron la retente toutes les 6 heures (`HUBSPOT_RETRY_DELAY_HOURS`) ; après 4 essais au total (`HUBSPOT_RETRY_MAX_ATTEMPTS`), elle est abandonnée et l'alerte détaille le mail, le contact et les erreurs.
 
 ### Configuration cron
 Dans `vercel.json` :
@@ -344,7 +375,7 @@ Dans `vercel.json` :
 Le cron exige `Authorization: Bearer $CRON_SECRET` (ajouté automatiquement par Vercel). Sans `CRON_SECRET`, la route répond 500.
 
 ### Vérifier le cron
-Vercel → projet → **Cron Jobs** dans le menu gauche → voir le dernier statut d'exécution. La réponse JSON contient `{ date, notified, purged, errors }` (`purged` : envois supprimés par la purge RGPD, voir plus bas).
+Vercel → projet → **Cron Jobs** dans le menu gauche → voir le dernier statut d'exécution. La réponse JSON contient `{ date, notified, skipped, retried, purged, notes, errors }` : DM envoyés, relances non notifiées par motif (`inscrit`, `adresse_invalide`, `indesirable`, `relance_mail`, `introuvable`), DM reportés, envois purgés (RGPD), Notes HubSpot retentées (`created`, `requeued`, `abandoned`). S'il y a des erreurs, elles arrivent aussi en DM d'alerte.
 
 ---
 
@@ -372,9 +403,14 @@ Les noms de clés et les scripts Lua sont centralisés dans `lib/kv-schema.ts`. 
 | `webhook_event:{svix-id}` | flag | Dédoublonnage : un événement webhook n'est traité qu'une fois | 7 jours | webhook |
 | `hubspot_note:{resend_id}:{opened\|clicked}` | flag | Verrou « une seule Note HubSpot par type d'événement » (`legacy` pour les entrées antérieures) | aucune — purge RGPD | webhook, migration |
 | `relance:{timestamp}` | JSON | **Ancien format** de relance, repris par la migration | ≈ J+7 | (plus écrit) |
+| `relance_lock:{resend_id}` | string | Verrou « une seule relance » (valeur = clé d'idempotence de la relance) | 24 h | `/api/relance/send` |
+| `slack_relance_attempts:{membre}` | compteur | Essais du DM J+3 quand Slack échoue | 7 jours | cron |
+| `hubspot_retry` / `hubspot_retry:{id}` | sorted set / JSON | Notes HubSpot en échec à retenter (score = prochain essai) | membre retiré une fois traité / 7 jours | `/api/send`, relance, webhook, cron |
+| `cache:airtable:formations:v1`, `cache:airtable:sessions:v1` | JSON | Tables Airtable lues en entier | 5 minutes | `/api/formations`, `/api/sessions` |
+| `ratelimit:{action}:{email}:{fenêtre}` | compteur | Limites de débit | 10 minutes | génération, envoi |
 
 Champs de `email_track` : les champs historiques (`contact_id`, `ps_nom`, `ps_email`, `commercial_name`, `formation_nom`, `sujet`, `statut`, `sent_at`, `opened_at`, `clicked_at`) sont conservés tels quels, si bien qu'une entrée v2 reste lisible par l'ancien code. Champs ajoutés :
-`v` (2), `kind` (`initial` / `relance`), `sent_day`, `commercial_key`, `commercial_email`, `commercial_slack_id`, `commercial_hubspot_id`, `ps_rpps`, `formation_numero`, `relance_due_day`, `message_id`, `delivered_at`, `bounced_at`, `complained_at`, `first_opened_at`, `first_clicked_at`, `last_opened_at`, `open_count`, `click_count`, `auto_click_count`, et les drapeaux internes `counted_*` (un fait n'est compté qu'une fois).
+`v` (2), `kind` (`initial` / `relance`), `sent_day`, `commercial_key`, `commercial_email`, `commercial_slack_id`, `commercial_hubspot_id`, `ps_rpps`, `ps_titre`, `ps_lastname`, `formation_numero`, `relance_due_day`, `sent_by` / `sent_by_name` (administrateur), `parent_id` (relance), `relance_id` / `relance_sent_at` (mail relancé), `slack_relance_at`, `click_notified_at`, `message_id`, `delivered_at`, `bounced_at`, `complained_at`, `first_opened_at`, `first_clicked_at`, `last_opened_at`, `open_count`, `click_count`, `auto_click_count`, et les drapeaux internes `counted_*` (un fait n'est compté qu'une fois).
 
 ### Statuts
 Libellés affichés (la valeur stockée dans `email_track.statut` est entre parenthèses) :
@@ -629,6 +665,13 @@ HubSpot n'a pas répondu (token, quota, panne). Ne pas créer le contact : rées
 3. Vérifier `SLACK_BOT_TOKEN` et `CRON_SECRET` dans les env vars Vercel
 4. Vérifier que le bot Slack a les scopes `chat:write` et `im:write`
 5. Vérifier que `slack_user_id` est renseigné pour le commercial dans Airtable
+6. Pas de DM attendu si une relance mail est déjà partie, en cas d'adresse invalide, de mail signalé comme indésirable, ou si le PS est inscrit (compteurs `skipped` de la réponse du cron)
+
+### Le bouton « Relancer » est désactivé
+La raison est affichée à côté : relance déjà envoyée, adresse invalide, signalé comme indésirable, mail d'un autre commercial (seul l'auteur ou un administrateur peut relancer), commercial du mail plus actif, ou compte en lecture seule.
+
+### Une alerte « Note HubSpot non créée (échec définitif) » est arrivée
+La Note a été retentée 4 fois sur environ 18 heures. Vérifier `HUBSPOT_TOKEN` et le scope `crm.objects.notes.write`, puis recréer la Note à la main sur la fiche du contact indiquée dans l'alerte (le texte de l'envoi est dans `/suivi`).
 
 ### Le webhook Resend ne met pas à jour le statut
 1. resend.com → Webhooks → vérifier que l'URL est correcte

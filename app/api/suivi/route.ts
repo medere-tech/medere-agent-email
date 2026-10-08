@@ -3,6 +3,7 @@ import { getKv, kvConfigured } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 import { isMigrated, parisDay, statsFromCounters, statsFromEntries, type Stats } from '@/lib/tracking'
 import { requireActor } from '@/lib/identity'
+import { relanceVerdict } from '@/lib/relance'
 
 // Lecture du KV à chaque appel : jamais de rendu statique au build, jamais de réponse
 // gardée en cache par le navigateur (sinon "Actualiser" peut réafficher d'anciens chiffres)
@@ -59,8 +60,31 @@ export async function GET(req: NextRequest) {
     const start = (page - 1) * limit
     const pageIds = (await kv.zrange(KEYS.emailsIndex, start, start + limit - 1, { rev: true })) as string[]
     const pageEntries = await mgetEntries(pageIds, true)
+    // Relance rattachée à chaque mail, et droit de relancer pour la personne connectée
+    const relanceIds = pageEntries.map((e) => e?.relance_id).filter((x): x is string => !!x)
+    const relances = relanceIds.length ? await mgetEntries(relanceIds, true) : []
+    const relanceById = new Map(relanceIds.map((id, i) => [id, relances[i]]))
     const emails = pageIds
-      .map((id, i) => (pageEntries[i] ? { resend_id: id, ...pageEntries[i] } : null))
+      .map((id, i) => {
+        const e = pageEntries[i]
+        if (!e) return null
+        const child = e.relance_id ? relanceById.get(e.relance_id) : null
+        const verdict = relanceVerdict(guard.actor, e)
+        return {
+          resend_id: id,
+          ...e,
+          relance: child ? {
+            resend_id: e.relance_id,
+            statut: child.statut,
+            sent_at: child.sent_at,
+            opened_at: child.first_opened_at || child.opened_at || null,
+            clicked_at: child.first_clicked_at || child.clicked_at || null,
+            sent_by_name: child.sent_by_name || null,
+          } : null,
+          relance_possible: verdict.ok,
+          relance_bloquee: verdict.ok ? null : verdict.error,
+        }
+      })
       .filter(Boolean)
 
     return NextResponse.json({

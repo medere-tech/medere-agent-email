@@ -318,19 +318,43 @@ export default function AgentMail() {
       .finally(() => setLoadingSessions(false))
   }, [formation])
 
-  // Contact search debounce
+  // Recherche de contact progressive : la première passe HubSpot s'affiche dès qu'elle arrive,
+  // les passes complémentaires sont AJOUTÉES à la suite (aucun réordonnancement, la liste ne saute
+  // pas, la sélection n'est pas touchée). Une réponse d'une recherche plus ancienne est ignorée.
+  const searchIdRef = useRef(0)
   useEffect(() => {
     setContactSearchFailed(false)
     if (contactSearch.length < 2) { setContactResults([]); return }
     const t = setTimeout(() => {
+      const id = ++searchIdRef.current
+      const q = encodeURIComponent(contactSearch)
       setContactSearching(true)
-      fetchJson(`/api/contact-search?q=${encodeURIComponent(contactSearch)}`)
-        .then((d) => setContactResults(d.contacts || []))
-        .catch(() => {
-          setContactResults([])
-          setContactSearchFailed(true)
+      setContactResults([])
+      let firstDone = false
+      let firstFailed = false
+      let pendingRest: HSContact[] | null = null
+      const append = (list: HSContact[]) =>
+        setContactResults((prev) => [...prev, ...list.filter((c) => !prev.some((p) => p.id === c.id))])
+      const first = fetchJson(`/api/contact-search?q=${q}&part=first`)
+        .then((d) => {
+          if (id !== searchIdRef.current) return
+          firstDone = true
+          append(d.contacts || [])
+          if (pendingRest) append(pendingRest)
         })
-        .finally(() => setContactSearching(false))
+        .catch(() => { firstDone = true; firstFailed = true; if (pendingRest && id === searchIdRef.current) append(pendingRest) })
+      const rest = fetchJson(`/api/contact-search?q=${q}&part=rest`)
+        .then((d) => {
+          if (id !== searchIdRef.current) return
+          if (firstDone) append(d.contacts || [])
+          else pendingRest = d.contacts || []
+        })
+        .then(() => false, () => true)
+      Promise.all([first, rest]).then(([, restFailed]) => {
+        if (id !== searchIdRef.current) return
+        if (firstFailed && restFailed) setContactSearchFailed(true)
+        setContactSearching(false)
+      })
     }, 350)
     return () => clearTimeout(t)
   }, [contactSearch])

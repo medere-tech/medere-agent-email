@@ -15,6 +15,8 @@ import {
   STAT_FIELDS,
   EVENT_SCRIPT,
   SEND_SCRIPT,
+  ATTACH_CHILD_SCRIPT,
+  MARK_ONCE_SCRIPT,
   addDays,
   commercialKey,
   dayInTimezone,
@@ -39,6 +41,9 @@ export interface RecordSendParams {
   corps: string
   // Administrateur ayant envoyé au nom du commercial (traçabilité)
   sentBy?: { email: string; name: string }
+  // Relance : rattachée au mail d'origine, hors de la liste principale, sans rappel J+3
+  kind?: 'initial' | 'relance'
+  parentId?: string
 }
 
 export interface RecordSendResult {
@@ -55,6 +60,7 @@ export async function recordSend(p: RecordSendParams): Promise<RecordSendResult>
   const relanceDate = addDays(sentDay, RELANCE_DELAY_DAYS)
   const ck = commercialKey(p.commercial.email, p.commercial.name)
 
+  const isRelance = p.kind === 'relance'
   const entry = {
     // Champs historiques (lus par /suivi depuis l'origine)
     contact_id: p.ps.id,
@@ -69,17 +75,19 @@ export async function recordSend(p: RecordSendParams): Promise<RecordSendResult>
     clicked_at: null,
     // Champs v2
     v: 2,
-    kind: 'initial',
+    kind: p.kind || 'initial',
     sent_day: sentDay,
     commercial_key: ck,
     commercial_email: p.commercial.email.trim().toLowerCase(),
     commercial_slack_id: p.commercial.slack_user_id || '',
     commercial_hubspot_id: p.commercial.hubspot_id || '',
     ps_rpps: p.ps.rpps || '',
+    ps_titre: p.ps.titre || '',
+    ps_lastname: p.ps.nom || '',
     formation_numero: p.formation.numero || '',
     open_count: 0,
     click_count: 0,
-    relance_due_day: relanceDate,
+    ...(isRelance ? { parent_id: p.parentId || '' } : { relance_due_day: relanceDate }),
     counted_sent: true,
     ...(p.sentBy ? { sent_by: p.sentBy.email, sent_by_name: p.sentBy.name } : {}),
   }
@@ -103,13 +111,23 @@ export async function recordSend(p: RecordSendParams): Promise<RecordSendResult>
       String(statsExpireAt(sentDay, RETENTION_DAYS)),
       JSON.stringify({ corps: p.corps }),
       String(EMAIL_BODY_TTL_DAYS * 86400),
-      String(dayStartMs(relanceDate)),
+      isRelance ? '' : String(dayStartMs(relanceDate)),
       p.commercial.name || '',
-      '1',
+      isRelance ? '0' : '1',
       p.ps.id ? '1' : '0',
     ]
   )
-  return { created: Number(created) === 1, relanceDate }
+  return { created: Number(created) === 1, relanceDate: isRelance ? '' : relanceDate }
+}
+
+// Rattache une relance à son mail d'origine (relance_id, et plus de relance J+3 Slack)
+export async function attachRelance(parentId: string, relanceId: string): Promise<number> {
+  return Number(await getKv().eval(ATTACH_CHILD_SCRIPT, [KEYS.track(parentId), KEYS.relancesDue], [relanceId, new Date().toISOString()]))
+}
+
+// Pose un champ une seule fois sur un envoi (ex. click_notified_at). true = posé maintenant.
+export async function markOnce(id: string, field: string, value = new Date().toISOString()): Promise<boolean> {
+  return Number(await getKv().eval(MARK_ONCE_SCRIPT, [KEYS.track(id)], [field, value])) === 1
 }
 
 // ─── Webhook ──────────────────────────────────────────────────────────────────
