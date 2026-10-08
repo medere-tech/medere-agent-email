@@ -44,8 +44,8 @@ export const TIMEZONE = 'Europe/Paris'
 // (sent_by dans le suivi, mention dans la Note HubSpot).
 export const ADMIN_EMAILS = ['dethie@medere.fr']
 
-// Fiches Commerciaux relues dans Airtable au plus toutes les N secondes : un commercial passé
-// « Plus actif » est bloqué partout en moins de N secondes, même avec une session valide.
+// Fiches Commerciaux : dernière version connue servie sans attente, rafraîchie en arrière-plan
+// quand elle a plus de N secondes (délai maximal de révocation : voir README « Rôles et accès »).
 export const COMMERCIAL_CACHE_SECONDS = 60
 
 // Limites de débit par personne connectée (fenêtre fixe)
@@ -54,7 +54,8 @@ export const RATE_LIMITS = {
   send: { max: 20, windowSeconds: 600 },
 } as const
 
-// Cache des tables Airtable lues en entier (formations, sessions) : en mémoire et dans le KV
+// Formations et sessions : dernière version connue (mémoire, puis KV), rafraîchie en arrière-plan
+// quand elle a plus de N secondes
 export const AIRTABLE_CACHE_SECONDS = 300
 
 // Destinataire des alertes techniques (DM Slack) : erreurs du cron, Note HubSpot en échec définitif

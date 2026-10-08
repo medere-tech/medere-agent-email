@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
       id,
       sujet: relanceSubject(entry),
       corps: redigee ? redigee.corps : relanceDraft(entry, body, sender.name),
-      redigeeParClaude: !!redigee,
+      redigee: !!redigee,
       statut: RELANCE_STATUS_LABEL[relanceStatus(entry)],
       corpsOrigineManquant: !body,
       ps: { nom: entry.ps_nom, email: entry.ps_email },

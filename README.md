@@ -118,6 +118,7 @@ medere-agent-email/
 │   ├── purge-test-sends.ts               # Supprime du KV les envois au PS de test
 │   └── seed-test.ts                      # Crée / supprime les données de test (base KV de test)
 ├── backups/                              # Exports KV (migrate-kv.ts --export) — ignoré par git
+├── instrumentation.ts                    # Démarrage du serveur : préchauffage des données Airtable
 ├── middleware.ts                         # Protection des routes + CVE-2025-29927
 ├── vercel.json                           # Configuration cron Vercel
 └── .env.local                            # Variables d'environnement (local, non versionné)
@@ -183,7 +184,7 @@ Si HubSpot ne répond pas, l'app affiche « HubSpot indisponible, ne crée pas l
 **Alerte « déjà contacté »** : dès qu'un contact est choisi, `/api/contact-history` lit `idx:contact:{id}` et liste les envois à ce contact des **14 derniers jours** (`CONTACT_HISTORY_DAYS`), tous commerciaux confondus : mail ou relance, qui, quand, quelle formation, quel statut (Envoyé, Reçu, Ouvert, Cliqué, Adresse invalide, Indésirable). Non bloquante. Si la vérification échoue, un message invite à consulter le suivi.
 
 **Étape 5 — Aperçu**
-- **Rédaction au fil de l'eau** : l'étape 5 s'ouvre dès que le serveur répond ; l'objet puis le texte s'écrivent progressivement pendant que Claude rédige (`/api/generate` répond en NDJSON : `start`, `delta`, `done` ou `error` ; format demandé à Claude : « Objet : … », ligne vide, texte — lu par `lib/generated-mail.ts`). Pendant la rédaction, les champs sont en lecture seule et l'envoi désactivé ; « Retour » annule la rédaction (le serveur arrête Claude). En cas d'échec, retour à l'étape 4 avec « La rédaction du mail a échoué. Réessaie. ».
+- **Rédaction au fil de l'eau** : l'étape 5 s'ouvre dès que le serveur répond (contrôles d'identité et de débit seulement ; les formations proposées sont calculées ensuite, dans le flux) ; l'objet puis le texte s'écrivent progressivement pendant que Claude rédige (`/api/generate` répond en NDJSON : `start`, `delta`, `done` ou `error` ; format demandé à Claude : « Objet : … », ligne vide, texte — lu par `lib/generated-mail.ts`). Pendant la rédaction, les champs sont en lecture seule et l'envoi désactivé ; « Retour » annule la rédaction (le serveur arrête Claude). En cas d'échec, retour à l'étape 4 avec « La rédaction du mail a échoué. Réessaie. ».
 - **Onglets « Texte » / « Aperçu »** : l'aperçu affiche le mail **tel qu'il sera reçu** (De, À, Objet, puis le HTML produit par la même fonction `renderMail` que l'envoi, avec l'apparence par défaut d'une messagerie). Un clic sur un lien de l'aperçu l'ouvre dans un nouvel onglet.
 - **Avertissements sur les liens** (`linkWarnings`, `lib/render-mail.ts`), non bloquants, aussi dans la fenêtre de relance : lien sans texte ou sans adresse, espace dans l'adresse, adresse ne commençant ni par `https://` ni par `www.`, parenthèse manquante, texte entre crochets sans adresse (« [Lien d'inscription] »), protocole mal écrit (`htps://`, `https:/`, `https//`), extension de site manquante (`www.agencedpc/…`).
 
@@ -217,7 +218,7 @@ Il envoie un `POST /api/auth/logout` (un simple lien GET ne peut pas déconnecte
 const SESSION_DURATION = 60 * 60 * 24 * 7 // 7 jours (JWT et maxAge du cookie)
 ```
 
-> Le JWT de session reste valide 7 jours, mais **l'accès d'un commercial est révocable** : passer sa fiche Airtable en « Plus actif » le bloque partout (génération, envoi, suivi) en moins de 60 secondes, même avec une session valide (voir « Rôles et accès »). Un compte `@medere.fr` sans fiche garde, lui, l'accès en lecture au suivi jusqu'à l'expiration de sa session.
+> Le JWT de session reste valide 7 jours, mais **l'accès d'un commercial est révocable** : passer sa fiche Airtable en « Plus actif » le bloque partout (génération, envoi, suivi), même avec une session valide, dans le délai décrit dans « Rôles et accès » (en pratique moins d'une minute). Un compte `@medere.fr` sans fiche garde, lui, l'accès en lecture au suivi jusqu'à l'expiration de sa session.
 
 ### Sécurité
 - Cookie `httpOnly` — inaccessible via JavaScript
@@ -228,7 +229,7 @@ const SESSION_DURATION = 60 * 60 * 24 * 7 // 7 jours (JWT et maxAge du cookie)
 - `NEXTAUTH_SECRET` absent → 500 explicite (log `[AUTH] NEXTAUTH_SECRET manquant`) au lieu d'une signature avec une clé vide
 
 ### Couper l'accès à un commercial
-1. Airtable → table Commerciaux → passer son `Statut` à « Plus actif » : il est bloqué partout **en moins de 60 secondes**, même avec une session ouverte (message « Ton accès à l'Agent Mail a été désactivé »).
+1. Airtable → table Commerciaux → passer son `Statut` à « Plus actif » : il est bloqué partout, même avec une session ouverte (message « Ton accès à l'Agent Mail a été désactivé »), dans le **délai maximal de révocation** ci-dessous.
 2. Désactiver son compte Google Workspace `@medere.fr` : il ne pourra plus se reconnecter.
 
 Pour une coupure immédiate de **tous** les accès, changer `NEXTAUTH_SECRET` sur Vercel et redéployer : toutes les sessions deviennent invalides.
@@ -243,7 +244,11 @@ Le rôle est déterminé **côté serveur** à chaque requête, à partir de l'e
 | Lecteur | compte `@medere.fr` sans fiche | — (message « Ton compte n'est pas associé à une fiche commercial… ») | non (403) | lecture seule |
 | Désactivé | fiche « Plus actif » (administrateur compris) | — | non (403) | non (403) |
 
-- Fiches relues dans Airtable au plus toutes les 60 secondes (`COMMERCIAL_CACHE_SECONDS`), avec un cache mémoire à durée **stricte** (le cache Next `revalidate` servirait une fiche périmée après le délai) : un passage à « Plus actif » est effectif en moins de 60 secondes, un retour à « Actif » aussi.
+- Fiches Commerciaux **en mémoire, jamais attendues** : chaque requête utilise la dernière version connue des fiches (mémoire de l'instance, sinon KV `cache:airtable:fiches:v1`, conservé après un redémarrage) ; dès qu'elle a plus de 60 secondes (`COMMERCIAL_CACHE_SECONDS`), elle est relue dans Airtable **en arrière-plan** (environ 1 s), sans faire attendre la requête. Sur un serveur qui tourne en continu, la relecture a aussi lieu chaque minute (`instrumentation.ts`).
+- **Délai maximal de révocation** (passage à « Plus actif », et de même pour un retour à « Actif » ou un changement d'email) :
+  - **app utilisée** (au moins une requête par minute, ou serveur qui tourne en continu) : **60 secondes + environ 1 seconde** de relecture Airtable ;
+  - **app inutilisée depuis plus de 60 secondes** (instance Vercel en sommeil) : la **première requête** qui suit est encore traitée avec l'ancienne fiche — c'est elle qui déclenche la relecture —, toutes les suivantes utilisent la fiche à jour. Une personne révoquée peut donc passer **une requête de plus** (un affichage, ou au pire un envoi) si personne n'a utilisé l'app dans la minute précédente.
+  - Pour un blocage immédiat et certain (départ, compte compromis) : passer la fiche en « Plus actif » **et** changer `NEXTAUTH_SECRET` sur Vercel et redéployer (toutes les sessions sont invalidées, voir « Authentification »).
 - Plusieurs fiches avec le même email : la fiche « Actif » est retenue.
 - `GET /api/me` renvoie le rôle et la fiche de la personne connectée (403 si désactivée).
 - Routes métier protégées : `/api/generate`, `/api/send`, `/api/sessions`, `/api/contact-search` (administrateur et commercial) ; `/api/suivi`, `/api/formations`, `/api/commerciaux`, `/api/me` (lecteur compris).
@@ -284,9 +289,11 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 
 ### Cache et pagination
 - Toute requête **paginée** passe par `atAll()` et n'utilise **jamais** le cache HTTP de Next (`cache: 'no-store'`), première page comprise. Une page 1 servie depuis ce cache porterait un `offset` expiré et provoquerait `422 LIST_RECORDS_ITERATOR_NOT_AVAILABLE`.
-- **Formations et table Sessions complète** : le résultat complet (après pagination) est gardé 5 minutes (`AIRTABLE_CACHE_SECONDS`) en mémoire et dans le KV (`cache:airtable:formations:v1`, `cache:airtable:sessions:v1`, partagés entre instances). Relire toute la table Sessions prenait ~3 s ; une modification Airtable apparaît donc dans l'app en 5 minutes au plus. Les sessions sont filtrées par formation et par date à chaque appel (la date change chaque jour, pas le cache).
-- **Préchargement** : à l'arrivée sur l'assistant, le navigateur charge le rôle, les formations, la liste des commerciaux (administrateur) et appelle `/api/sessions?warm=1`, qui remplit le cache des sessions avant que le commercial n'arrive à l'étape 3.
-- **Fiches Commerciaux** : cache mémoire strict de 60 s (voir « Rôles et accès »).
+- **Aucun utilisateur n'attend Airtable** : fiches Commerciaux, formations et table Sessions complète sont **toujours servies depuis la dernière version connue** — mémoire de l'instance, sinon KV (`cache:airtable:fiches:v1`, `cache:airtable:formations:v1`, `cache:airtable:sessions:v1`, partagés entre instances, conservés 30 jours, donc aussi après un redémarrage ou un nouveau déploiement) — puis **rafraîchies en arrière-plan** quand elles ont dépassé leur durée de fraîcheur (fiches : 60 s ; formations et sessions : 5 minutes, `AIRTABLE_CACHE_SECONDS`). Une modification Airtable apparaît donc dans l'app en 5 minutes environ (fiches : voir « Rôles et accès »). Sur Vercel, le rafraîchissement est confié à `waitUntil` pour aller au bout même après la réponse. Si Airtable est indisponible, la dernière version connue reste servie (erreur dans les journaux).
+- **Préchauffage** : au démarrage du serveur, `instrumentation.ts` charge ces tables (fiches, formations, sessions, catalogue ; depuis le KV, ou Airtable si le KV est vide) puis les rafraîchit chaque minute tant que le serveur tourne. Seul un tout premier démarrage avec un KV vide et aucune requête préalable ferait attendre Airtable. Les sessions sont filtrées par formation et par date à chaque appel (la date change chaque jour, pas le cache).
+- **Préchargement côté navigateur** : à l'arrivée sur l'assistant, le navigateur charge le rôle, les formations et la liste des commerciaux (administrateur).
+- **Formations proposées en fin de mail** : calculées à partir des caches (catalogue des formations actives `cache:airtable:catalogue:v1` + table Sessions), sans requête Airtable (quelques millisecondes au lieu de plusieurs secondes). Les formations déjà suivies par le PS sont pré-calculées dès que le contact est choisi à l'étape 4 (`/api/contact-history` lance `prefetchFormationsDejaFaites`) et gardées 10 minutes (`cache:deja_faites:{empreinte SHA-256 de l'email et du RPPS}`). La rédaction ouvre l'étape 5 avant ce calcul.
+- **Objectif de réactivité** : aucune action ne fait attendre le commercial plus de 300 ms, sauf la rédaction du mail elle-même et la recherche de contact (temps de réponse de HubSpot, 300 à 600 ms). Mesures : voir le rapport du lot « instantané ».
 - La recherche Clients (une page) garde le cache Next de 60 s.
 - Le cron lit toujours Airtable sans cache (inscriptions et correspondance session → formation à jour).
 - Recherche de contact HubSpot **progressive** : la première passe (la plus pertinente : email, RPPS ou recherche texte, `?part=first`) et les passes complémentaires (`?part=rest` : texte sans accents, prénom + nom, mots séparés, en parallèle) partent en même temps ; la première liste s'affiche dès son arrivée, les contacts supplémentaires sont **ajoutés à la suite** (aucun réordonnancement, la sélection en cours n'est pas touchée). « Aucun contact trouvé » n'apparaît qu'une fois toutes les passes terminées. Une réponse 429 de HubSpot est retentée jusqu'à 2 fois.
@@ -337,12 +344,12 @@ Une seule fonction, `renderMail` (`lib/render-mail.ts`, sans dépendance), produ
 Dans le détail d'un mail, bouton **« Relancer »** (ou lien « Préparer la relance par mail » du DM J+3, qui ouvre `/suivi?relance={resend_id}`). La fenêtre de relance propose :
 - objet `Relance : votre formation {nom de la formation}` ;
 - texte pré-rempli : formule d'appel (« Bonjour {titre} {nom}, »), une introduction adaptée au statut — **non ouvert**, **ouvert sans clic** ou **cliqué** —, la signature, puis « ----- Mon précédent message ----- » et le mail d'origine ;
-- tout est modifiable ; **« Rédiger avec Claude »** rédige une relance adaptée au statut (même limite de débit que la génération), **une seule fois par mail d'origine** : le bouton disparaît ensuite (« Rédigée par Claude · modifiable à la main »), le texte reste modifiable à la main ;
+- tout est modifiable ; **« Rédiger la relance »** fait rédiger une relance adaptée au statut (même limite de débit que la génération), **une seule fois par mail d'origine** : le bouton disparaît ensuite (« Rédigée · modifiable à la main »), le texte reste modifiable à la main ;
 - corps d'origine : `email_body` (90 jours), sinon redemandé à Resend ; s'il n'est plus disponible, la relance s'ouvre **sans le corps d'origine** avec un message, à compléter ou à faire rédiger par Claude.
 
 Rédaction unique, contrôlée côté serveur (`/api/relance/generate`) :
 - à la première rédaction, le texte de Claude est enregistré dans `relance_draft:{resend_id}` (supprimé avec l'envoi par la purge RGPD) ;
-- tout appel suivant pour ce mail — rechargement, autre onglet, administrateur, appel direct — renvoie ce brouillon **sans appeler Claude** (`dejaRedigee: true`, journal « Brouillon déjà rédigé renvoyé, sans appel à Claude ») ; `GET /api/relance` pré-remplit la fenêtre avec ce texte (`redigeeParClaude: true`) ;
+- tout appel suivant pour ce mail — rechargement, autre onglet, administrateur, appel direct — renvoie ce brouillon **sans appeler Claude** (`dejaRedigee: true`, journal « Brouillon déjà rédigé renvoyé, sans appel à Claude ») ; `GET /api/relance` pré-remplit la fenêtre avec ce texte (`redigee: true`) ;
 - verrou atomique `relance_gen_lock:{resend_id}` (SET NX, 180 s) : deux demandes simultanées ne font **qu'un appel à Claude**, la seconde attend le brouillon de la première ;
 - si Claude échoue, le verrou est libéré (script `RELEASE_LOCK_SCRIPT`, seulement par son propriétaire) et rien n'est enregistré : un nouvel essai est possible.
 
@@ -419,7 +426,8 @@ Les noms de clés et les scripts Lua sont centralisés dans `lib/kv-schema.ts`. 
 | `relance_gen_lock:{resend_id}` | string | Verrou de rédaction (un seul appel à Claude à la fois) | 180 s | `/api/relance/generate` |
 | `slack_relance_attempts:{membre}` | compteur | Essais du DM J+3 quand Slack échoue | 7 jours | cron |
 | `hubspot_retry` / `hubspot_retry:{id}` | sorted set / JSON | Notes HubSpot en échec à retenter (score = prochain essai) | membre retiré une fois traité / 7 jours | `/api/send`, relance, webhook, cron |
-| `cache:airtable:formations:v1`, `cache:airtable:sessions:v1` | JSON | Tables Airtable lues en entier | 5 minutes | `/api/formations`, `/api/sessions` |
+| `cache:deja_faites:{empreinte}` | JSON `{ at, value }` | Formations déjà suivies par un PS (record IDs), pour les formations proposées | 10 minutes | `/api/contact-history` (pré-calcul), `/api/generate` |
+| `cache:airtable:fiches:v1`, `cache:airtable:formations:v1`, `cache:airtable:sessions:v1`, `cache:airtable:catalogue:v1` | JSON `{ at, value }` | Dernière version connue des tables Airtable lues en entier (rafraîchie en arrière-plan après 60 s / 5 min) | 30 jours | `lib/airtable.ts` (requêtes, `instrumentation.ts`) |
 | `ratelimit:{action}:{email}:{fenêtre}` | compteur | Limites de débit | 10 minutes | génération, envoi |
 
 Champs de `email_track` : les champs historiques (`contact_id`, `ps_nom`, `ps_email`, `commercial_name`, `formation_nom`, `sujet`, `statut`, `sent_at`, `opened_at`, `clicked_at`) sont conservés tels quels, si bien qu'une entrée v2 reste lisible par l'ancien code. Champs ajoutés :
@@ -614,7 +622,7 @@ Les données de test se créent et se suppriment à la demande avec `scripts/see
 ### Ajouter un commercial
 1. Airtable → table Commerciaux → ajouter un record
 2. Renseigner : `hubspot_name`, `email` (**exactement l'adresse de son compte Google `@medere.fr`** : c'est elle qui rattache sa connexion à sa fiche), `phone`, `slack_user_id`, `hubspot_id`, `Statut="Actif"`
-3. L'app le reconnaît à sa prochaine requête (60 s au plus) ; il n'a qu'à se connecter avec son compte Google
+3. L'app le reconnaît en une minute environ (voir « Délai maximal de révocation », même mécanisme) ; il n'a qu'à se connecter avec son compte Google
 
 ### Désactiver un commercial
 1. Airtable → table Commerciaux → changer `Statut` de `Actif` à autre chose
@@ -699,7 +707,7 @@ Vérifier que le champ `Format` est bien dans les fields chargés dans `getSessi
 
 ### Un commercial ne peut plus se connecter ou voit « Ton accès à l'Agent Mail a été désactivé »
 1. Vérifier que son compte Google Workspace `@medere.fr` est actif
-2. Vérifier que son `Statut` est `Actif` dans Airtable Commerciaux (effet en moins de 60 s)
+2. Vérifier que son `Statut` est `Actif` dans Airtable Commerciaux (effet en une minute environ, voir « Délai maximal de révocation »)
 3. « Ton compte n'est pas associé à une fiche commercial » : l'`email` de sa fiche doit être exactement l'adresse de son compte Google (logs `[IDENTITE]`)
 4. « La connexion a expiré ou a été interrompue » : recommencer la connexion (le `state` OAuth expire après 10 minutes)
 

@@ -37,41 +37,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Il manque des informations : vérifie la formation, les sessions et le contact.' }, { status: 400 })
     }
 
-    // Upsell intelligent : formations actives, même public, session disponible juste après en tenant compte de la spécialité du PS, de la date de fin max des sessions sélectionnées, et que le PS n'a pas déjà faites
-    let formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string }> = []
-    try {
-      if (formation.public?.length) {
-        // Date de fin la plus tardive des sessions sélectionnées par le PS
-        // Priorité : date_cv2 (2ème soirée CV) > date_fin > date_cv1
-        // Pour les classes virtuelles à 2 soirées, date_cv2 est la vraie date de fin
+    if (resolved.onBehalf) console.log('[GENERATE] Génération par', actor.email, 'au nom de', sender.email)
+
+    // Formations proposées en fin de mail : calculées APRÈS l'ouverture de l'étape 5 (dans le flux),
+    // pour que le commercial n'attende pas Airtable avant de voir la rédaction commencer.
+    // Formations actives, même public, session disponible juste après la fin des sessions choisies
+    // (date_cv2 > date_fin > date_cv1), adaptées à la spécialité, pas déjà faites par le PS.
+    const loadUpsell = async (): Promise<Array<{ nom: string; format: string; prochaineSession?: string }>> => {
+      if (!formation.public?.length) return []
+      try {
         const dateFinMax = sessions
           .map((s: any) => s.date_cv2 || s.date_fin || s.date_cv1 || '')
           .filter(Boolean)
           .sort()
           .at(-1) || new Date().toISOString().slice(0, 10)
-
         const dejaFaites = await getFormationsDejaFaites(ps.rpps || '', ps.email || '')
-
-        formationsLiees = await getFormationsUpsell(
-          formation.id,
-          formation.public,
-          dateFinMax,
-          dejaFaites,
-          ps.specialite || ''
-        )
+        return await getFormationsUpsell(formation.id, formation.public, dateFinMax, dejaFaites, ps.specialite || '')
+      } catch (e) {
+        console.error('[UPSELL] Erreur:', e)
+        return [] // non bloquant
       }
-    } catch (e) {
-      console.error('[UPSELL] Erreur:', e)
-      // Non-blocking
-    }
-
-    if (resolved.onBehalf) console.log('[GENERATE] Génération par', actor.email, 'au nom de', sender.email)
-    const params = {
-      commercial: { name: sender.name, email: sender.email, phone: sender.phone },
-      formation,
-      sessions,
-      ps,
-      formationsLiees,
     }
 
     const encoder = new TextEncoder()
@@ -87,6 +72,15 @@ export async function POST(req: NextRequest) {
         emit({ t: 'start' })
         let full = ''
         try {
+          const formationsLiees = await loadUpsell()
+          if (cancelled) return
+          const params = {
+            commercial: { name: sender.name, email: sender.email, phone: sender.phone },
+            formation,
+            sessions,
+            ps,
+            formationsLiees,
+          }
           for await (const delta of streamMail(params)) {
             if (cancelled) break
             full += delta
@@ -94,7 +88,7 @@ export async function POST(req: NextRequest) {
           }
           if (cancelled) return
           const { sujet, corps } = parseGeneratedMail(full)
-          if (!sujet || !corps) throw new Error('Réponse de Claude incomplète (objet ou texte manquant)')
+          if (!sujet || !corps) throw new Error('Réponse incomplète (objet ou texte manquant)')
           emit({ t: 'done', sujet, corps })
         } catch (e: any) {
           console.error('[GENERATE] Rédaction en échec :', e.message)

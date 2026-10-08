@@ -24,7 +24,15 @@ export async function GET(req: NextRequest) {
     const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
     const limit = 20
 
-    const total = await kv.zcard(KEYS.emailsIndex)
+    // Lectures indépendantes lancées ensemble (regroupées en un seul aller-retour par le client
+    // KV) : total, état de la migration, premier envoi et ids de la page courante
+    const start = (page - 1) * limit
+    const [total, migrated, first, pageIds] = await Promise.all([
+      kv.zcard(KEYS.emailsIndex),
+      isMigrated(),
+      kv.zrange(KEYS.emailsIndex, 0, 0, { withScores: true }) as Promise<(string | number)[]>,
+      kv.zrange(KEYS.emailsIndex, start, start + limit - 1, { rev: true }) as Promise<string[]>,
+    ])
     if (total === 0) {
       return NextResponse.json({
         emails: [],
@@ -37,15 +45,13 @@ export async function GET(req: NextRequest) {
 
     // Stats depuis le premier envoi : somme des compteurs journaliers une fois la base
     // migrée (scripts/migrate-kv.ts) ; avant, calculées sur les entrées elles-mêmes.
-    let counts: Stats
-    if (await isMigrated()) {
-      const first = (await kv.zrange(KEYS.emailsIndex, 0, 0, { withScores: true })) as (string | number)[]
-      const fromDay = parisDay(Number(first[1]))
-      counts = await statsFromCounters(fromDay, parisDay())
-    } else {
-      const allIds = (await kv.zrange(KEYS.emailsIndex, 0, -1)) as string[]
-      counts = statsFromEntries(await mgetEntries(allIds))
-    }
+    // Données complètes pour la page courante, lues en même temps que les stats.
+    const [counts, pageEntries] = await Promise.all([
+      migrated
+        ? statsFromCounters(parisDay(Number(first[1])), parisDay())
+        : kv.zrange(KEYS.emailsIndex, 0, -1).then((allIds) => mgetEntries(allIds as string[])).then(statsFromEntries),
+      mgetEntries(pageIds, true),
+    ]) as [Stats, Record<string, any>[]]
 
     const stats = {
       total: counts.sent,
@@ -56,10 +62,6 @@ export async function GET(req: NextRequest) {
       plaintes: counts.complained,
     }
 
-    // Données complètes pour la page courante uniquement
-    const start = (page - 1) * limit
-    const pageIds = (await kv.zrange(KEYS.emailsIndex, start, start + limit - 1, { rev: true })) as string[]
-    const pageEntries = await mgetEntries(pageIds, true)
     // Relance rattachée à chaque mail, et droit de relancer pour la personne connectée
     const relanceIds = pageEntries.map((e) => e?.relance_id).filter((x): x is string => !!x)
     const relances = relanceIds.length ? await mgetEntries(relanceIds, true) : []

@@ -24,7 +24,7 @@ export interface GenerateMailParams {
 
 // Prompt du mail initial. Réponse attendue en texte : « Objet : … », une ligne vide, puis le mail
 // (format lisible au fil de l'eau pour l'affichage progressif, voir lib/generated-mail.ts).
-function buildMailPrompt(params: GenerateMailParams): string {
+export function buildMailPrompt(params: GenerateMailParams): string {
   const { commercial, formation, sessions, ps, formationsLiees } = params
 
   const sessionsText = sessions

@@ -14,7 +14,7 @@ interface Draft {
   corps: string
   statut: string
   corpsOrigineManquant: boolean
-  redigeeParClaude: boolean
+  redigee: boolean
   ps: { nom: string; email: string }
   formation: string
   envoyeLe: string
@@ -84,7 +84,7 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
 
   useEffect(() => {
     call(`/api/relance?id=${encodeURIComponent(id)}`)
-      .then((d: Draft) => { setDraft(d); setSujet(d.sujet); setCorps(d.corps); setRedigee(d.redigeeParClaude) })
+      .then((d: Draft) => { setDraft(d); setSujet(d.sujet); setCorps(d.corps); setRedigee(d.redigee) })
       .catch((e) => setLoadError(e.message))
   }, [id])
 
@@ -169,7 +169,7 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
                   <Icon.Warning />
                   <span>{redigee
                     ? "Le texte du mail d'origine n'est plus disponible : il n'est pas repris dans la relance."
-                    : "Le texte du mail d'origine n'est plus disponible : complète la relance toi-même ou fais-la rédiger par Claude."}</span>
+                    : "Le texte du mail d'origine n'est plus disponible : complète la relance toi-même ou utilise « Rédiger la relance »."}</span>
                 </div>
               )}
               <div>
@@ -185,14 +185,14 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-xs font-medium text-zinc-500">Texte de la relance</label>
                   {redigee ? (
-                    <span className="text-xs text-zinc-400">Rédigée par Claude · modifiable à la main</span>
+                    <span className="text-xs text-zinc-400">Rédigée · modifiable à la main</span>
                   ) : (
                     <button
                       onClick={regenerate}
                       disabled={generating || sending}
                       className="flex items-center gap-1.5 text-xs text-zinc-600 hover:text-zinc-900 disabled:opacity-40"
                     >
-                      {generating ? <><Icon.Loader /> Rédaction en cours...</> : <><Icon.Sparkle /> Rédiger avec Claude</>}
+                      {generating ? <><Icon.Loader /> Rédaction en cours...</> : <><Icon.Sparkle /> Rédiger la relance</>}
                     </button>
                   )}
                 </div>

@@ -3,6 +3,7 @@ import { requireActor } from '@/lib/identity'
 import { getKv, kvConfigured } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 import { CONTACT_HISTORY_DAYS } from '@/lib/config'
+import { prefetchFormationsDejaFaites } from '@/lib/airtable'
 
 export const dynamic = 'force-dynamic'
 
@@ -22,6 +23,9 @@ export async function GET(req: NextRequest) {
   const guard = await requireActor()
   if (!guard.ok) return guard.response
   const contactId = req.nextUrl.searchParams.get('contactId') || ''
+  // Le contact vient d'être choisi : on pré-calcule ses formations déjà suivies (formations proposées
+  // en fin de mail), sans attendre, pour que la rédaction démarre sans requête Airtable
+  prefetchFormationsDejaFaites(req.nextUrl.searchParams.get('rpps') || '', req.nextUrl.searchParams.get('email') || '')
   if (!/^\d{1,20}$/.test(contactId) || !kvConfigured()) {
     return NextResponse.json({ jours: CONTACT_HISTORY_DAYS, envois: [] }, { headers: { 'Cache-Control': 'no-store' } })
   }

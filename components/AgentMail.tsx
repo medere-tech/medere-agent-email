@@ -376,7 +376,8 @@ export default function AgentMail() {
     if (!psContact) { setHistory(null); return }
     let alive = true
     const contactId = psContact.id
-    fetchJson(`/api/contact-history?contactId=${encodeURIComponent(contactId)}`)
+    const qs = new URLSearchParams({ contactId, email: psContact.email || '', rpps: psContact.rpps || '' })
+    fetchJson(`/api/contact-history?${qs}`)
       .then((d) => { if (alive) setHistory({ contactId, jours: d.jours || 14, envois: d.envois || [], failed: false }) })
       .catch(() => { if (alive) setHistory({ contactId, jours: 14, envois: [], failed: true }) })
     return () => { alive = false }
@@ -915,7 +916,7 @@ export default function AgentMail() {
               <div>
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Aperçu du mail</h2>
                 <p className="text-sm text-zinc-500">
-                  {generating ? 'Claude rédige le mail…' : 'Vérifie et modifie si nécessaire avant d\'envoyer.'}
+                  {generating ? 'Rédaction du mail en cours…' : 'Vérifie et modifie si nécessaire avant d\'envoyer.'}
                 </p>
               </div>
 

@@ -203,7 +203,7 @@ Données : `seed --relance --names --purge` (envois au PS de test au nom de « C
 | K5 | Ancien objet `commercial: {…}` forgé, sans `commercial_id` | ignoré : signature Dethie Faye |
 | K6 | `ADMIN_EMAILS` vidé (annexe §6) : `/api/me`, étape 1, `generate` et `send` au nom de Zacharie | `role: commercial` ; étape 1 verrouillée « Ton compte » ; 403 « Tu ne peux générer et envoyer des mails qu'en ton nom. » — **remettre `ADMIN_EMAILS`** |
 | K7 | Envoi réel `[TEST-L2]` en commercial | `email_track` : nom, email, Slack `U05UVHGBURX`, owner `176772849` relus dans Airtable, pas de `sent_by` ; Note sans « Envoyé par » |
-| K8 | Fiche `recubd9fXVX2rkhfB` → « Plus actif » (connecteur Airtable : le jeton de l'app est en lecture seule), interroger `/api/me`, `/api/generate`, `/api/suivi`, `/api/send` toutes les 4 s | tout en 403 en moins de 60 s ; accueil et `/suivi` affichent « Ton accès à l'Agent Mail a été désactivé… » — **remettre « Actif »**, accès rétabli en moins de 60 s |
+| K8 | Fiche `recubd9fXVX2rkhfB` → « Plus actif » (connecteur Airtable : le jeton de l'app est en lecture seule), interroger `/api/me`, `/api/generate`, `/api/suivi`, `/api/send` toutes les 4 s | tout en 403 en 61 s au plus (fiches rafraîchies en arrière-plan, aucune requête ne dépasse 300 ms) ; accueil et `/suivi` affichent « Ton accès à l'Agent Mail a été désactivé… » — **remettre « Actif »**, accès rétabli en moins de 60 s |
 | K9 | 31 `generate` puis 21 `send` invalides (aucun appel à Claude, aucun envoi) | 30 × 400 puis 429 « … limite de 30 générations… » ; 20 × 400 puis 429 « … limite de 20 envois… » — vider `ratelimit:*` |
 | K10 | `/api/auth/login` ×2 ; callback sans cookie, sans `state`, avec `state` différent, avec `state` identique et code faux | 307 vers Google avec `state` différent à chaque fois + cookie httpOnly `Path=/api/auth` ; `invalid_state` ×3 ; `server_error` (state accepté, code refusé) ; cookie effacé |
 | K11 | Connexion Google réelle (déconnexion puis « Se connecter avec Google ») | retour sur `/`, session créée |
@@ -222,7 +222,7 @@ Données : `seed --relances` (envois de la fiche Dethie Faye, relance J+3 due : 
 | L4 | Adresse invalide, indésirable, déjà relancé, inconnu | 409 / 409 / 409 / 404, messages lisibles |
 | L5 | Corps d'origine supprimé (`email_body`) et absent chez Resend | `corpsOrigineManquant: true`, brouillon sans corps d'origine |
 | L6 | Administrateur sur un mail de Zacharie (**préparation seule**) ; même mail en rôle commercial | 200 « au nom de Zacharie » ; 403 « Seul le commercial qui a envoyé ce mail… » (préparer et envoyer) |
-| L7 | Envoi réel `[TEST-L3-A]`, `opened`, puis `/suivi?relance={id}` | fenêtre ouverte directement, pré-remplie « ouvert, sans clic » ; « Rédiger avec Claude » remplace le texte |
+| L7 | Envoi réel `[TEST-L3-A]`, `opened`, puis `/suivi?relance={id}` | fenêtre ouverte directement, pré-remplie « ouvert, sans clic » ; « Rédiger la relance » remplace le texte |
 | L8 | Objet préfixé `[TEST-L3-B]`, « Envoyer la relance » | 200 `in_reply_to: true` ; KV : `relance_id` sur l'origine, relance `kind: relance` + `parent_id`, origine retirée de `relances_due`, `relance_sent` +1 ; Gmail (source) : `In-Reply-To` = `References` = Message-ID de l'origine (Resend), multipart avec texte brut |
 | L9 | Rejeu même clé ; autre clé ; nouvelle préparation | rejeu 200 `replay: true` même relance ; 409 ; 409 ; `/suivi` : « Relancé », relance sous le mail, plus de bouton |
 | L10 | Cron (×2) | 1er : `notified: 4` (rattrapage compris), `skipped` adresse invalide / indésirable / relance mail = 1, 1 erreur « pas d'identifiant Slack » → DM d'alerte ; 2e : rien. DM reçus par le testeur seul, avec statut et lien `/suivi?relance=` |
@@ -236,8 +236,8 @@ Données : `seed --relances`. Journaux du serveur : « Appel à Claude pour la r
 
 | # | Étapes | Attendu |
 |---|---|---|
-| LB1 | `/suivi?relance=test-rel-ouvert`, « Rédiger avec Claude » | texte remplacé ; le bouton disparaît, « Rédigée par Claude · modifiable à la main » ; `relance_draft:test-rel-ouvert` créé |
-| LB2 | Recharger la page | pas de bouton, même texte (`redigeeParClaude: true`) |
+| LB1 | `/suivi?relance=test-rel-ouvert`, « Rédiger la relance » | texte remplacé ; le bouton disparaît, « Rédigée · modifiable à la main » ; `relance_draft:test-rel-ouvert` créé |
+| LB2 | Recharger la page | pas de bouton, même texte (`redigee: true`) |
 | LB3 | `POST /api/relance/generate` direct (même mail) | 200 `dejaRedigee: true`, même texte ; journal « déjà rédigé », **aucun** « Appel à Claude » |
 | LB4 | Deux `POST` simultanés sur `test-rel-clique` | deux 200, même texte ; **un seul** « Appel à Claude », une « attente du brouillon » |
 | LB5 | `ANTHROPIC_API_KEY` faussée (sauvegarde de `.env.local`), `POST` sur `test-rel-non-ouvert` ; clé restaurée, nouveau `POST` | 500 « La rédaction de la relance a échoué. Réessaie. », ni verrou ni brouillon ; puis 200, texte rédigé — **SHA-256 de `.env.local` identique** |
@@ -258,6 +258,16 @@ Contrôles par lecture de la page (DOM). Données : `seed --historique` (contact
 | M7 | `ANTHROPIC_API_KEY` faussée, « Générer le mail » ; clé restaurée | retour à l'étape 4 avec « La rédaction du mail a échoué. Réessaie. » — SHA-256 identique |
 | M8 | Fenêtre de relance : ajouter « https:/medere.fr » | avertissement « Adresse mal écrite » |
 | M9 | Performance (production locale) | voir le rapport du lot 5 |
+
+### N. Instantané (données Airtable jamais attendues)
+
+| # | Étapes | Attendu |
+|---|---|---|
+| N1 | Supprimer `cache:airtable:*` (KV de test), démarrer `npm run start` | `instrumentation.ts` remplit fiches, formations, sessions et catalogue dans le KV en quelques secondes |
+| N2 | Parcours complet à chaud (production locale) | étapes 2, 3, 4 et bascule Texte/Aperçu < 300 ms ; étape 5 ouverte ~0,3 s ; `/api/suivi`, `/api/contact-history`, préparation de relance < 300 ms ; recherche HubSpot 300 à 600 ms (service externe) |
+| N3 | Formations proposées depuis le cache (Panorama de la vaccination, Refus scolaire anxieux ; médecin généraliste) | mêmes 3 formations et mêmes dates que l'ancien calcul Airtable ; calcul en quelques millisecondes |
+| N4 | Contact choisi à l'étape 4 | `cache:deja_faites:{empreinte}` créé (10 min) ; la rédaction n'interroge plus Clients / Inscriptions |
+| N5 | Aucune mention de l'IA | aucune occurrence de « Claude », « IA », « intelligence artificielle » dans l'interface, les messages d'erreur, les champs de l'API (`redigee`), les DM, les Notes et les mails |
 
 ### G. Non-régression complète
 
