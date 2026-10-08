@@ -3,7 +3,8 @@ import { getKv } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 import { STATUT_ACTIF, normalizeEmail, type Fiche } from '@/lib/roles'
 import type { Actor } from '@/lib/identity'
-import { SMS_TIP, dpcStepsText } from '@/lib/dpc-steps'
+import { SMS_TIP, dpcStepsText, sessionsText, type SessionForText } from '@/lib/dpc-steps'
+import { getFormationsActives, getSessionsByFormation } from '@/lib/airtable'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
 
@@ -60,22 +61,19 @@ export function relanceVerdict(actor: Actor, entry: Record<string, any> | null):
   return { ok: true, entry, sender, sentBy }
 }
 
-// Corps du mail d'origine : KV (90 jours), sinon Resend, sinon null (relance sans le corps d'origine)
-export async function originalBody(id: string): Promise<string | null> {
+// Sessions à présenter dans la relance : prochaines sessions de la formation (par numéro DPC),
+// relues dans le cache Airtable (jamais attendu) ; au plus 3. Aucune session trouvée → liste vide.
+export async function relanceSessions(entry: Record<string, any>): Promise<SessionForText[]> {
+  const numero = String(entry.formation_numero || '').trim()
+  if (!numero) return []
   try {
-    const stored = await getKv().get<{ corps?: string }>(KEYS.body(id))
-    if (stored?.corps) return stored.corps
+    const formation = (await getFormationsActives()).find((f) => String(f.numero).trim() === numero)
+    if (!formation) return []
+    return (await getSessionsByFormation(formation.id, formation.format)).slice(0, 3)
   } catch (e: any) {
-    console.error('[RELANCE] Corps KV illisible :', e.message)
+    console.error('[RELANCE] Sessions indisponibles :', e.message)
+    return []
   }
-  try {
-    const { data } = await resend.emails.get(id)
-    if (data?.text) return data.text
-    if (data?.html) return htmlToText(data.html)
-  } catch (e: any) {
-    console.error('[RELANCE] Corps indisponible chez Resend :', e.message)
-  }
-  return null
 }
 
 // Message-ID du mail d'origine (fil de discussion) : reçu par webhook, sinon demandé à Resend
@@ -90,15 +88,6 @@ export async function originalMessageId(id: string, entry: Record<string, any>):
   }
 }
 
-function htmlToText(html: string): string {
-  return html
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<a [^>]*href="([^"]+)"[^>]*>([^<]*)<\/a>/gi, (_m, url, label) => (label === url ? url : `${label} (${url})`))
-    .replace(/<[^>]+>/g, '')
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
-    .trim()
-}
-
 function frenchDate(iso: string): string {
   try {
     return new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', timeZone: 'Europe/Paris' }).format(new Date(iso))
@@ -111,32 +100,38 @@ export function relanceSubject(entry: Record<string, any>): string {
   return `Relance : votre formation ${String(entry.formation_nom || '').trim()}`
 }
 
-// Brouillon de relance : formule d'appel, introduction adaptée au statut, parcours d'inscription à jour
-// (7 étapes avec le code SMS, quel que soit le contenu du mail d'origine), rappel du mail d'origine
-export function relanceDraft(entry: Record<string, any>, body: string | null, senderName: string): string {
+// Brouillon de relance, IDENTIQUE quel que soit le statut du mail d'origine (RGPD : rien ne laisse
+// deviner le suivi des ouvertures ou des clics) : formule d'appel, introduction neutre, sessions,
+// parcours d'inscription à jour en 7 étapes, signature. Le mail d'origine n'est pas recopié.
+export function relanceDraft(entry: Record<string, any>, sessions: SessionForText[], sender: { name: string; email?: string; phone?: string }): string {
   const titre = String(entry.ps_titre || '').trim()
   const nom = String(entry.ps_lastname || '').trim()
   const greeting = titre && nom ? `Bonjour ${titre} ${nom},` : 'Bonjour,'
   const formation = String(entry.formation_nom || '').trim()
   const date = frenchDate(entry.sent_at)
-  const intro: Record<RelanceStatus, string> = {
-    non_ouvert: `Je me permets de revenir vers vous au sujet de la formation « ${formation} », dont je vous ai transmis les informations${date ? ` le ${date}` : ''}. Votre inscription est intégralement prise en charge par l'ANDPC.`,
-    ouvert_sans_clic: `Je reviens vers vous suite à mon message${date ? ` du ${date}` : ''} concernant la formation « ${formation} ». Avez-vous pu avancer sur votre inscription ? Si une étape vous pose difficulté, je peux vous guider par téléphone.`,
-    clique: `Je reviens vers vous suite à mon message${date ? ` du ${date}` : ''} concernant la formation « ${formation} ». Si votre inscription n'est pas encore finalisée, je reste à votre disposition pour vous accompagner.`,
-  }
   const parts = [
-    greeting, '', intro[relanceStatus(entry)], '',
-    "Voici les étapes d'inscription à jour (l'ANDPC demande désormais un code reçu par SMS) :",
-    dpcStepsText(String(entry.formation_numero || '')), '', SMS_TIP, '',
-    'Bien cordialement,', senderName,
+    greeting, '',
+    `Je me permets de revenir vers vous concernant la formation « ${formation} », dont je vous ai transmis les informations${date ? ` le ${date}` : ''}. Cette formation est intégralement prise en charge par l'ANDPC.`, '',
   ]
-  if (body) parts.push('', '----- Mon précédent message -----', '', body.trim())
+  if (sessions.length) parts.push(sessions.length > 1 ? 'Voici les sessions disponibles :' : 'Voici la session disponible :', sessionsText(sessions), '')
+  parts.push(
+    "Pour vous inscrire, voici les étapes (l'ANDPC demande désormais un code reçu par SMS) :",
+    dpcStepsText(String(entry.formation_numero || '')), '', SMS_TIP, '',
+    "Je reste à votre disposition pour vous accompagner dans votre inscription.", '',
+    'Bien cordialement,', '',
+    ...[sender.name, sender.email, sender.phone].filter((x): x is string => !!x),
+  )
   return parts.join('\n')
 }
 
 // Relance rédigée par Claude : une seule génération par mail d'origine. Le brouillon est gardé
 // (relance_draft:{id}, purgé avec l'envoi) et renvoyé à toute demande suivante, sans appel à Claude.
+// v: 2 = relance neutre (sans statut ni mail d'origine recopié). Un brouillon d'un format antérieur
+// est ignoré et rédigé de nouveau.
+export const STORED_RELANCE_VERSION = 2
+
 export interface StoredRelance {
+  v: number
   corps: string
   generated_at: string
   generated_by: string
@@ -144,5 +139,5 @@ export interface StoredRelance {
 
 export async function storedRelance(id: string): Promise<StoredRelance | null> {
   const d = await getKv().get<StoredRelance>(KEYS.relanceDraft(id))
-  return d && typeof d.corps === 'string' && d.corps ? d : null
+  return d && d.v === STORED_RELANCE_VERSION && typeof d.corps === 'string' && d.corps ? d : null
 }

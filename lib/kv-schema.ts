@@ -4,7 +4,7 @@
 //
 // Clés :
 //   email_track:{id}          JSON de l'envoi (format historique + champs v2), sans TTL, purgé par le cron
-//   email_body:{id}           JSON { corps } du mail, TTL EMAIL_BODY_TTL_DAYS
+//   email_body:{id}           JSON { corps } du mail : PLUS ÉCRIT (anciennes clés : expiration ≤ 90 jours)
 //   email_clicks:{id}         liste des derniers clics { t, i, l, a, r } (heure, lien, automatique, raison),
 //                             TTL CLICK_HISTORY_TTL_DAYS — sert à détecter les rafales
 //   emails_index              sorted set des envois initiaux (score = date d'envoi en ms)
@@ -144,7 +144,7 @@ local function encode(d)
 end
 `
 
-// Création d'un envoi (NX) + index + compteur "sent" + corps + relance, en une fois.
+// Création d'un envoi (NX) + index + compteur "sent" + relance, en une fois (corps : plus stocké, ARGV[5] = '').
 // KEYS : 1 track, 2 emails_index, 3 idx:commercial, 4 idx:contact, 5 stats:day,
 //        6 meta:commerciaux, 7 email_body, 8 relances_due
 // ARGV : 1 entrée JSON, 2 score (ms), 3 id, 4 expireAt stats, 5 corps JSON ('' = aucun),
@@ -351,7 +351,7 @@ return 1
 `
 
 // Reprise d'une ancienne clé relance:{ts} rattachée à son envoi : champs manquants
-// complétés, relance planifiée dans relances_due, corps sauvegardé, ancienne clé supprimée.
+// complétés, relance planifiée dans relances_due, ancienne clé supprimée (corps : plus sauvegardé, ARGV[4] = '').
 // KEYS : 1 track, 2 relances_due, 3 ancienne clé relance:*, 4 email_body
 // ARGV : 1 id, 2 score échéance (ms), 3 champs JSON, 4 corps JSON ('' = aucun), 5 TTL corps (s, > 0),
 //        6 jour d'échéance
@@ -417,20 +417,175 @@ redis.call('ZREM', KEYS[2], parentId)
 return 1
 `
 
-// Pose un champ une seule fois (ex. click_notified_at : un seul DM de premier clic par envoi)
-// KEYS : 1 track ; ARGV : 1 champ, 2 valeur. Retour : 1 posé maintenant, 0 déjà posé ou envoi inconnu
 // Libère un verrou seulement s'il appartient encore à celui qui l'a pris (KEYS[1] = verrou, ARGV[1] = jeton)
 export const RELEASE_LOCK_SCRIPT = `
 if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
 return 0
 `
 
+// Pose un champ une seule fois (ex. click_notified_at : un seul DM de premier clic par envoi)
+// KEYS : 1 track ; ARGV : 1 champ, 2 valeur. Retour : 1 posé maintenant, 0 déjà posé ou envoi inconnu
 export const MARK_ONCE_SCRIPT = LUA_COMMON + `
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
 local d = cjson.decode(raw)
 if isset(d[ARGV[1]]) then return 0 end
 d[ARGV[1]] = ARGV[2]
+redis.call('SET', KEYS[1], encode(d))
+return 1
+`
+
+// Requête de /suivi (et de l'export CSV) en un seul aller-retour, côté KV.
+// KEYS : 1 index de base (emails_index, ou idx:commercial:{clé} pour un commercial), 2 emails_index
+// ARGV : 1 début (ms), 2 fin (ms), 3 statut exact ou '', 4 formation (numéro DPC ou nom) ou '',
+//        5 recherche (minuscules, sans accents) ou '', 6 décalage, 7 nombre (-1 = tous),
+//        8 '1' = lire les entrées (filtre statut / formation / recherche),
+//        9 '1' = renvoyer les formations de la période (facettes), 10 '1' = renvoyer les entrées de la page
+// Les relances (présentes dans idx:commercial) sont écartées : seuls les envois de emails_index comptent.
+// Retour (JSON) : { total, ids, entries, children, stats?, formations? }
+export const SUIVI_QUERY_SCRIPT = LUA_COMMON + `
+local FOLD = {
+  ['é'] = 'e', ['è'] = 'e', ['ê'] = 'e', ['ë'] = 'e', ['É'] = 'e', ['È'] = 'e', ['Ê'] = 'e', ['Ë'] = 'e',
+  ['à'] = 'a', ['â'] = 'a', ['ä'] = 'a', ['À'] = 'a', ['Â'] = 'a', ['Ä'] = 'a',
+  ['î'] = 'i', ['ï'] = 'i', ['Î'] = 'i', ['Ï'] = 'i', ['ô'] = 'o', ['ö'] = 'o', ['Ô'] = 'o', ['Ö'] = 'o',
+  ['ù'] = 'u', ['û'] = 'u', ['ü'] = 'u', ['Ù'] = 'u', ['Û'] = 'u', ['Ü'] = 'u', ['ç'] = 'c', ['Ç'] = 'c',
+  ['ÿ'] = 'y', ['œ'] = 'oe', ['Œ'] = 'oe', ['æ'] = 'ae', ['Æ'] = 'ae'
+}
+local function fold(s)
+  s = tostring(s or '')
+  for a, b in pairs(FOLD) do s = string.gsub(s, a, b) end
+  return string.lower(s)
+end
+
+local ids = redis.call('ZREVRANGEBYSCORE', KEYS[1], ARGV[2], ARGV[1])
+local checkInitial = KEYS[1] ~= KEYS[2]
+local fStatut, fFormation, fQuery = ARGV[3], ARGV[4], ARGV[5]
+local offset, count = tonumber(ARGV[6]), tonumber(ARGV[7])
+local readEntries = ARGV[8] == '1' or ARGV[9] == '1'
+local wantFacets, wantEntries = ARGV[9] == '1', ARGV[10] == '1'
+
+local total = 0
+local pageIds, pageRaw = {}, {}
+local stats = { sent = 0, delivered = 0, opened = 0, clicked = 0, bounced = 0, complained = 0 }
+local facets, facetOrder = {}, {}
+
+for _, id in ipairs(ids) do
+  if (not checkInitial) or redis.call('ZSCORE', KEYS[2], id) then
+    local raw, d = nil, nil
+    if readEntries then
+      raw = redis.call('GET', 'email_track:' .. id)
+      if raw then d = cjson.decode(raw) end
+    end
+    if (not readEntries) or d then
+      if wantFacets and d then
+        local key = isset(d.formation_numero) and tostring(d.formation_numero) or tostring(d.formation_nom or '')
+        if key ~= '' then
+          if not facets[key] then facets[key] = { key, tostring(d.formation_nom or key), 0 }; table.insert(facetOrder, key) end
+          facets[key][3] = facets[key][3] + 1
+        end
+      end
+      local ok = true
+      if d then
+        if fStatut ~= '' and d.statut ~= fStatut then ok = false end
+        if ok and fFormation ~= '' and tostring(d.formation_numero or '') ~= fFormation and tostring(d.formation_nom or '') ~= fFormation then ok = false end
+        if ok and fQuery ~= '' and not string.find(fold(tostring(d.ps_nom or '') .. ' ' .. tostring(d.ps_email or '')), fQuery, 1, true) then ok = false end
+      end
+      if ok then
+        total = total + 1
+        if d then
+          local opened = isset(d.first_opened_at) or isset(d.opened_at) or isset(d.first_clicked_at) or isset(d.clicked_at) or d.statut == 'ouvert' or d.statut == 'cliqué'
+          local clicked = isset(d.first_clicked_at) or isset(d.clicked_at) or d.statut == 'cliqué'
+          local complained = isset(d.complained_at) or d.statut == 'plainte'
+          stats.sent = stats.sent + 1
+          if isset(d.delivered_at) or opened or complained or d.statut == 'délivré' or (tonumber(d.auto_click_count) or 0) > 0 then stats.delivered = stats.delivered + 1 end
+          if opened then stats.opened = stats.opened + 1 end
+          if clicked then stats.clicked = stats.clicked + 1 end
+          if isset(d.bounced_at) or d.statut == 'bounce' then stats.bounced = stats.bounced + 1 end
+          if complained then stats.complained = stats.complained + 1 end
+        end
+        if total > offset and (count < 0 or #pageIds < count) then
+          table.insert(pageIds, id)
+          if wantEntries then table.insert(pageRaw, raw or redis.call('GET', 'email_track:' .. id) or '') end
+        end
+      end
+    end
+  end
+end
+
+-- Relances rattachées aux mails de la page
+local children = {}
+if wantEntries then
+  for i, raw in ipairs(pageRaw) do
+    if raw ~= '' then
+      local d = cjson.decode(raw)
+      if isset(d.relance_id) then
+        local c = redis.call('GET', 'email_track:' .. d.relance_id)
+        if c then children[d.relance_id] = c end
+      end
+    end
+  end
+end
+
+local out = { total = total, ids = pageIds, entries = pageRaw, children = children }
+if ARGV[8] == '1' then out.stats = stats end
+if wantFacets then
+  local list = {}
+  for _, k in ipairs(facetOrder) do table.insert(list, facets[k]) end
+  out.formations = list
+end
+return cjson.encode(out)
+`
+
+// Rattrapage d'un envoi DÉJÀ en v2 modifié ensuite par l'ancien code (webhook opened / clicked reçu
+// par l'ancienne version pendant le déploiement : statut et opened_at / clicked_at écrits, sans
+// first_*, sans comptage, statut parfois rétrogradé). Lancé par la seconde migration.
+//   - first_opened_at / first_clicked_at repris de opened_at / clicked_at, verrou de Note « legacy »
+//     (l'ancien code a déjà créé la Note HubSpot) ;
+//   - statut remonté d'après les faits (jamais rétrogradé) ;
+//   - faits manquants comptés une seule fois (marqueurs counted_*).
+// KEYS : 1 track, 2 stats:day (jour d'envoi), 3 hubspot_note:{id}:opened, 4 hubspot_note:{id}:clicked
+// ARGV : 1 expireAt stats
+// Retour : 1 si l'envoi a été rattrapé, 0 sinon
+export const CATCHUP_SCRIPT = LUA_COMMON + `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local d = cjson.decode(raw)
+if d.v ~= 2 then return 0 end
+local changed = false
+if not isset(d.first_opened_at) and isset(d.opened_at) then
+  d.first_opened_at = d.opened_at
+  redis.call('SET', KEYS[3], 'legacy', 'NX')
+  changed = true
+end
+if not isset(d.first_clicked_at) and isset(d.clicked_at) then
+  d.first_clicked_at = d.clicked_at
+  redis.call('SET', KEYS[4], 'legacy', 'NX')
+  changed = true
+end
+if (tonumber(d.open_count) or 0) == 0 and isset(d.first_opened_at) then d.open_count = 1; changed = true end
+if (tonumber(d.click_count) or 0) == 0 and isset(d.first_clicked_at) then d.click_count = 1; changed = true end
+local before = d.statut
+promote(d, computeStatut(d))
+if d.statut ~= before then changed = true end
+
+local exp = tonumber(ARGV[1])
+local function cnt(field)
+  if d['counted_' .. field] then return end
+  count(d, KEYS[2], exp, field)
+  if d['counted_' .. field] then changed = true end
+end
+local opened = isset(d.first_opened_at) or isset(d.first_clicked_at)
+local r = RANK[d.statut] or 0
+cnt('sent')
+if isset(d.delivered_at) or opened or (tonumber(d.auto_click_count) or 0) > 0
+   or (r >= 1 and r <= 3) or d.statut == 'plainte' or isset(d.complained_at) then
+  cnt('delivered')
+end
+if opened then cnt('opened') end
+if isset(d.first_clicked_at) then cnt('clicked') end
+if isset(d.bounced_at) or d.statut == 'bounce' then cnt('bounced') end
+if isset(d.complained_at) or d.statut == 'plainte' then cnt('complained') end
+if not changed then return 0 end
 redis.call('SET', KEYS[1], encode(d))
 return 1
 `

@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActor } from '@/lib/identity'
 import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
-import { checkRelance, originalBody, relanceStatus, storedRelance, type StoredRelance } from '@/lib/relance'
+import { STORED_RELANCE_VERSION, checkRelance, relanceSessions, storedRelance, type StoredRelance } from '@/lib/relance'
 import { generateRelance } from '@/lib/claude'
 import { getKv } from '@/lib/kv'
 import { KEYS, RELEASE_LOCK_SCRIPT } from '@/lib/kv-schema'
@@ -16,7 +16,8 @@ const WAIT_POLL_MS = 800
 
 const FAILED = 'La rédaction de la relance a échoué. Réessaie.'
 
-// Relance rédigée par Claude (adaptée au statut), une seule fois par mail d'origine :
+// Relance rédigée par Claude, une seule fois par mail d'origine, identique quel que soit le statut
+// (le statut n'est jamais transmis au prompt) :
 //   - brouillon déjà rédigé → renvoyé tel quel, sans appel à Claude (rechargement, autre onglet,
 //     autre utilisateur autorisé, appel direct) ;
 //   - verrou atomique relance_gen_lock:{id} : deux demandes simultanées ne font qu'un appel,
@@ -60,11 +61,9 @@ export async function POST(req: NextRequest) {
         ps: { titre: entry.ps_titre || '', nom: entry.ps_lastname || '' },
         formationNom: entry.formation_nom || '',
         formationNumero: entry.formation_numero || '',
-        statut: relanceStatus(entry),
-        sentAt: entry.sent_at || '',
-        originalBody: await originalBody(id),
+        sessions: await relanceSessions(entry),
       })
-      const stored: StoredRelance = { corps, generated_at: new Date().toISOString(), generated_by: actor.email }
+      const stored: StoredRelance = { v: STORED_RELANCE_VERSION, corps, generated_at: new Date().toISOString(), generated_by: actor.email }
       await kv.set(KEYS.relanceDraft(id), stored, { ex: RETENTION_DAYS * 86400 })
       return NextResponse.json({ corps })
     } finally {

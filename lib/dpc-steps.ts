@@ -25,3 +25,35 @@ export function dpcSteps(numeroAction: string): string[] {
 export function dpcStepsText(numeroAction: string): string {
   return dpcSteps(numeroAction).map((s, i) => `${i + 1}. ${s}`).join('\n')
 }
+
+// Sessions telles que présentées au PS (mail initial, relance rédigée, brouillon de relance)
+export interface SessionForText {
+  numero: string
+  date_cv1?: string
+  date_cv2?: string
+  temps_lisible?: string
+}
+
+function formatLongDate(dateStr: string): string {
+  if (!dateStr) return ''
+  try {
+    return new Intl.DateTimeFormat('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(dateStr))
+  } catch {
+    return dateStr
+  }
+}
+
+export function sessionsText(sessions: SessionForText[]): string {
+  return sessions
+    .map((s) => {
+      const parts = [`Session ${s.numero}`]
+      if (s.temps_lisible) parts.push(`- ${s.temps_lisible}`)
+      else if (s.date_cv1) parts.push(`- ${formatLongDate(s.date_cv1)}`)
+      if (s.date_cv2) parts.push(`/ 2ème soirée : ${formatLongDate(s.date_cv2)}`)
+      return parts.join(' ')
+    })
+    .join('\n')
+}
+
+// RGPD : aucun texte destiné à un PS ne mentionne ni ne laisse deviner le suivi des ouvertures et des clics
+export const NO_TRACKING_RULE = `CONFIDENTIALITÉ (règle absolue) : ne mentionne jamais et ne laisse jamais deviner que l'ouverture du mail ou les clics sont suivis. Interdit notamment : « j'ai vu que », « vous avez pu prendre connaissance », « vous avez ouvert », « vous avez consulté », « vous avez lu », « vous n'avez pas eu le temps de lire », « vous avez cliqué », et toute formulation équivalente. Ne fais aucune supposition sur ce que le PS a fait ou non du premier mail.`

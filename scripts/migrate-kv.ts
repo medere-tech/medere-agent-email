@@ -28,9 +28,10 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { EMAIL_BODY_TTL_DAYS, RETENTION_DAYS, TIMEZONE } from '../lib/config.ts'
+import { RETENTION_DAYS, TIMEZONE } from '../lib/config.ts'
 import {
   ATTACH_RELANCE_SCRIPT,
+  CATCHUP_SCRIPT,
   KEYS,
   MIGRATE_SCRIPT,
   SCHEMA_VERSION,
@@ -303,6 +304,32 @@ function isset(v: unknown): boolean {
   return v !== undefined && v !== null && v !== '' && v !== false
 }
 
+// Faits constatés sur un envoi en v2 (mêmes règles que les scripts Lua) : base de --verify et du rattrapage
+function factsOf(e: Entry): Record<string, boolean> {
+  return {
+    sent: true,
+    delivered: isset(e.delivered_at) || isset(e.first_opened_at) || isset(e.first_clicked_at) || Number(e.auto_click_count) > 0 ||
+      ['délivré', 'ouvert', 'cliqué', 'plainte'].includes(e.statut) || isset(e.complained_at),
+    opened: isset(e.first_opened_at) || isset(e.first_clicked_at),
+    clicked: isset(e.first_clicked_at),
+    bounced: isset(e.bounced_at) || e.statut === 'bounce',
+    complained: isset(e.complained_at) || e.statut === 'plainte',
+  }
+}
+
+// Envoi déjà en v2 modifié ensuite par l'ancien code (webhook reçu par l'ancienne version pendant le
+// déploiement) : ouverture ou clic sans first_*, statut rétrogradé, ou fait constaté non compté
+const STATUT_RANK: Record<string, number> = { 'envoyé': 0, 'délivré': 1, 'ouvert': 2, 'cliqué': 3 }
+function needsCatchUp(e: Entry): boolean {
+  if (e.v !== 2) return false
+  if (isset(e.opened_at) && !isset(e.first_opened_at)) return true
+  if (isset(e.clicked_at) && !isset(e.first_clicked_at)) return true
+  const expected = isset(e.first_clicked_at) || isset(e.clicked_at) ? 3 : isset(e.first_opened_at) || isset(e.opened_at) ? 2 : 0
+  if ((STATUT_RANK[e.statut] ?? 10) < expected) return true
+  const f = factsOf(e)
+  return STAT_FIELDS.some((field) => f[field] && e[`counted_${field}`] !== true)
+}
+
 // Mêmes règles que MIGRATE_SCRIPT, pour le rapport --dry-run
 function contributions(e: Entry): Record<string, number> {
   const opened = isset(e.first_opened_at) || isset(e.opened_at) || isset(e.first_clicked_at) || isset(e.clicked_at)
@@ -350,6 +377,7 @@ async function migrate(host: string, dryRun: boolean): Promise<void> {
   })
 
   const todo = entries.filter((x) => x.entry.v !== 2)
+  const catchUp = entries.filter((x) => needsCatchUp(x.entry))
   const perDay = new Map<string, Record<string, number>>()
   const perCommercial = new Map<string, { name: string; count: number; reason: string }>()
   const commands: Cmd[] = []
@@ -379,7 +407,18 @@ async function migrate(host: string, dryRun: boolean): Promise<void> {
     ])
   }
 
+  // Envois déjà en v2 modifiés par l'ancien code pendant le déploiement : rattrapés (seconde migration)
+  for (const { id, entry, score } of catchUp) {
+    const day = isset(entry.sent_day) ? String(entry.sent_day) : dayInTimezone(score, TIMEZONE)
+    commands.push([
+      'EVAL', CATCHUP_SCRIPT, 4,
+      KEYS.track(id), KEYS.statsDay(day), KEYS.noteLock(id, 'opened'), KEYS.noteLock(id, 'clicked'),
+      statsExpireAt(day, RETENTION_DAYS),
+    ])
+  }
+
   console.log(`Envois : ${entries.length} au total, ${entries.length - todo.length} déjà en v2, ${todo.length} à migrer` +
+    (catchUp.length ? `, ${catchUp.length} déjà en v2 à rattraper (modifiés par l'ancien code : ouverture ou clic non compté)` : '') +
     (unreadable.length ? `, ${unreadable.length} illisible(s) ignoré(s) : ${unreadable.join(', ')}` : ''))
   if (todo.length) {
     const days = Array.from(perDay.keys()).sort()
@@ -422,8 +461,7 @@ async function migrate(host: string, dryRun: boolean): Promise<void> {
       entry.sujet === r.sujet &&
       Number.isFinite(sentMs) && Math.abs(score - sentMs) <= RELANCE_MATCH_WINDOW_MS)
     if (candidates.length === 1 && due) {
-      const { id, score } = candidates[0]
-      const bodyTtl = Math.floor((score + EMAIL_BODY_TTL_DAYS * 86400000 - Date.now()) / 1000)
+      const { id } = candidates[0]
       const fields = {
         ps_rpps: r.ps_rpps || '',
         formation_numero: r.formation_numero || '',
@@ -432,7 +470,8 @@ async function migrate(host: string, dryRun: boolean): Promise<void> {
       commands.push([
         'EVAL', ATTACH_RELANCE_SCRIPT, 4,
         KEYS.track(id), KEYS.relancesDue, key, KEYS.body(id),
-        id, dayStartMs(due), JSON.stringify(fields), bodyTtl > 0 && r.corps ? JSON.stringify({ corps: r.corps }) : '', Math.max(bodyTtl, 1), due,
+        // corps de l'ancienne relance : plus sauvegardé (minimisation RGPD)
+        id, dayStartMs(due), JSON.stringify(fields), '', 1, due,
       ])
       matched.push(`${key} → ${id} (échéance ${due})${late}`)
     } else {
@@ -453,8 +492,9 @@ async function migrate(host: string, dryRun: boolean): Promise<void> {
 
   const results = await pipeline(commands)
   const migrated = results.filter((r, i) => commands[i][1] === MIGRATE_SCRIPT && Number(r) === 1).length
+  const caughtUp = results.filter((r, i) => commands[i][1] === CATCHUP_SCRIPT && Number(r) === 1).length
   await kv('SET', KEYS.schemaVersion, SCHEMA_VERSION)
-  console.log(`\nMigration terminée : ${migrated} envoi(s) migré(s), ${matched.length} relance(s) rattachée(s), ` +
+  console.log(`\nMigration terminée : ${migrated} envoi(s) migré(s), ${caughtUp} envoi(s) déjà migré(s) rattrapé(s), ${matched.length} relance(s) rattachée(s), ` +
     `${orphans.length} relance(s) en legacy. ${KEYS.schemaVersion} = ${SCHEMA_VERSION}.`)
 }
 
@@ -490,14 +530,10 @@ async function verify(): Promise<void> {
     }
     v2++
     const prefix = e.kind === 'relance' ? 'relance_' : ''
-    const facts: Record<string, boolean> = {
-      sent: true,
-      delivered: isset(e.delivered_at) || isset(e.first_opened_at) || isset(e.first_clicked_at) || Number(e.auto_click_count) > 0 ||
-        ['délivré', 'ouvert', 'cliqué', 'plainte'].includes(e.statut) || isset(e.complained_at),
-      opened: isset(e.first_opened_at) || isset(e.first_clicked_at),
-      clicked: isset(e.first_clicked_at),
-      bounced: isset(e.bounced_at) || e.statut === 'bounce',
-      complained: isset(e.complained_at) || e.statut === 'plainte',
+    const facts = factsOf(e)
+    // Ouverture / clic écrit par l'ancien code sans first_* : fait constaté, à rattraper
+    if ((isset(e.opened_at) && !isset(e.first_opened_at)) || (isset(e.clicked_at) && !isset(e.first_clicked_at))) {
+      incoherent.push(`${key} : ouverture ou clic de l'ancien code non repris (relancer la migration)`)
     }
     for (const field of STAT_FIELDS) {
       const counted = e[`counted_${field}`] === true

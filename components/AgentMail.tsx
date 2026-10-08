@@ -631,7 +631,7 @@ export default function AgentMail() {
 
           {/* Error */}
           {error && (
-            <div className="mb-4 flex items-start gap-2 p-3 bg-red-50 border border-red-100 rounded-lg text-sm text-red-700">
+            <div className="mb-4 flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-400 rounded-lg text-sm text-zinc-900">
               <Icons.Warning />
               <span>{error}</span>
             </div>
@@ -828,14 +828,14 @@ export default function AgentMail() {
               )}
 
               {contactSearchFailed && !contactSearching && !psContact && (
-                <div className="p-3 bg-red-50 border border-red-100 rounded-lg flex items-start gap-2 text-sm text-red-700">
+                <div className="p-3 bg-zinc-50 border border-zinc-400 rounded-lg flex items-start gap-2 text-sm text-zinc-900">
                   <Icons.Warning />
                   <span>HubSpot indisponible, ne crée pas le contact. Réessaie dans quelques instants.</span>
                 </div>
               )}
 
               {contactSearch.length >= 2 && !contactSearching && !contactSearchFailed && contactResults.length === 0 && !psContact && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg flex items-start gap-2 text-sm text-amber-700">
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg flex items-start gap-2 text-sm text-zinc-700">
                   <Icons.Warning />
                   <span>Aucun contact trouvé dans HubSpot. Vérifie l'orthographe ou crée le contact dans HubSpot d'abord.</span>
                 </div>
@@ -880,7 +880,7 @@ export default function AgentMail() {
               )}
 
               {psContact && history?.contactId === psContact.id && history.envois.length > 0 && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-sm text-amber-800" data-alerte="deja-contacte">
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-sm text-zinc-700" data-alerte="deja-contacte">
                   <div className="flex items-start gap-2 font-medium">
                     <Icons.Warning />
                     <span>Déjà contacté ces {history.jours} derniers jours</span>
@@ -980,8 +980,8 @@ export default function AgentMail() {
                       {/* Même HTML que le mail envoyé (renderMail), avec l'apparence par défaut d'une messagerie.
                           Un clic sur un lien l'ouvre dans un nouvel onglet, sans quitter l'agent. */}
                       <div
-                        className="px-4 py-3.5 max-h-[28rem] overflow-y-auto break-words [&_a]:text-[#1155cc] [&_a]:underline"
-                        style={{ fontFamily: 'Arial, Helvetica, sans-serif', fontSize: '14px', lineHeight: 1.5, color: '#222' }}
+                        className="px-4 py-3.5 max-h-[28rem] overflow-y-auto break-words [&_a]:text-zinc-900 [&_a]:underline"
+                        style={{ fontFamily: 'Arial, Helvetica, sans-serif', fontSize: '14px', lineHeight: 1.5, color: '#27272a' }}
                         onClick={(e) => {
                           const a = (e.target as HTMLElement).closest('a')
                           if (a) { e.preventDefault(); window.open(a.href, '_blank', 'noopener,noreferrer') }
@@ -994,7 +994,7 @@ export default function AgentMail() {
               </div>
 
               {warnings.length > 0 && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-sm text-amber-800" data-alerte="liens">
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-sm text-zinc-700" data-alerte="liens">
                   <div className="flex items-start gap-2 font-medium">
                     <Icons.Warning />
                     <span>{warnings.length === 1 ? 'Un lien à vérifier' : `${warnings.length} liens à vérifier`} avant l'envoi</span>
@@ -1031,7 +1031,7 @@ export default function AgentMail() {
           {step === 6 && sendResult && (
             <div className="space-y-5 py-2">
               <div className="flex flex-col items-center text-center gap-3 py-4">
-                <div className="text-green-600">
+                <div className="text-zinc-900">
                   <Icons.CircleCheck />
                 </div>
                 <div>
@@ -1066,7 +1066,7 @@ export default function AgentMail() {
 
               {/* Pending actions */}
               {!sendResult.relance_stored && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-700 space-y-1">
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-xs text-zinc-700 space-y-1">
                   <p>Le rappel n'a pas pu être programmé : pense à relancer ce PS toi-même dans 3 jours.</p>
                 </div>
               )}
@@ -1102,7 +1102,7 @@ function StatusRow({ icon, label, ok, detail }: {
       </div>
       <div className="flex items-center gap-1.5">
         {detail && <span className="text-[11px] text-zinc-400">{detail}</span>}
-        <div className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-green-500' : 'bg-red-400'}`} />
+        <div className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-zinc-900' : 'border border-zinc-400 bg-white'}`} />
       </div>
     </div>
   )

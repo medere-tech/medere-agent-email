@@ -6,9 +6,9 @@
 // expirent d'eux-mêmes. Les Notes HubSpot ne sont pas concernées.
 export const RETENTION_DAYS = 1095
 
-// Le corps des mails (email_body:{id}) n'est gardé que pour pré-remplir une relance :
-// 200 mails/jour × ~3 Ko × 3 ans dépasserait 600 Mo. Au-delà, le corps est relu chez Resend.
-export const EMAIL_BODY_TTL_DAYS = 90
+// Le corps des mails (email_body:{id}) n'est plus stocké (minimisation RGPD : plus aucun usage depuis
+// que la relance ne recopie plus le mail d'origine). Les clés existantes expirent seules (90 jours
+// au plus) ; la purge et les scripts continuent de les supprimer tant qu'il peut en rester.
 
 // Ouvertures et clics automatiques (antivirus, filtres de sécurité). Par défaut, toute
 // ouverture et tout clic est humain : un PS qui ouvre le mail pendant l'appel est notre
@@ -74,3 +74,9 @@ export const REDACTION_MODEL = 'claude-opus-4-6'
 
 // Alerte « déjà contacté » à l'étape 4 : envois au même contact sur les N derniers jours
 export const CONTACT_HISTORY_DAYS = 14
+
+// Date (AAAA-MM-JJ) à partir de laquelle les ouvertures sont fiables (copie du commercial séparée,
+// clics automatiques écartés). À renseigner le jour du déploiement. Pour une période qui commence
+// avant cette date, /suivi affiche : « Taux d'ouverture antérieurs au JJ/MM/AAAA surestimés (copie
+// commerciale comptée). » null = pas encore renseignée, aucun avertissement.
+export const TRACKING_RELIABLE_SINCE: string | null = null

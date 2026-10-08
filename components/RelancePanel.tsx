@@ -13,7 +13,6 @@ interface Draft {
   sujet: string
   corps: string
   statut: string
-  corpsOrigineManquant: boolean
   redigee: boolean
   ps: { nom: string; email: string }
   formation: string
@@ -164,14 +163,6 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
               {draft.auNomDe && (
                 <p className="text-xs text-zinc-500">La relance part au nom de {draft.auNomDe} ; tu seras indiqué comme expéditeur dans la Note HubSpot.</p>
               )}
-              {draft.corpsOrigineManquant && (
-                <div className="flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-200 rounded-lg text-xs text-zinc-700">
-                  <Icon.Warning />
-                  <span>{redigee
-                    ? "Le texte du mail d'origine n'est plus disponible : il n'est pas repris dans la relance."
-                    : "Le texte du mail d'origine n'est plus disponible : complète la relance toi-même ou utilise « Rédiger la relance »."}</span>
-                </div>
-              )}
               <div>
                 <label className="block text-xs font-medium text-zinc-500 mb-1">Objet</label>
                 <input
@@ -204,7 +195,7 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
                 />
               </div>
               {warnings.length > 0 && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-800" data-alerte="liens">
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-xs text-zinc-700" data-alerte="liens">
                   <div className="flex items-start gap-2 font-medium">
                     <Icon.Warning />
                     <span>{warnings.length === 1 ? 'Un lien à vérifier' : `${warnings.length} liens à vérifier`} avant l'envoi</span>

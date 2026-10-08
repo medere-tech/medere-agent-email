@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActor } from '@/lib/identity'
-import { RELANCE_STATUS_LABEL, checkRelance, originalBody, relanceDraft, relanceStatus, relanceSubject, storedRelance } from '@/lib/relance'
+import { RELANCE_STATUS_LABEL, checkRelance, relanceDraft, relanceSessions, relanceStatus, relanceSubject, storedRelance } from '@/lib/relance'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,14 +14,13 @@ export async function GET(req: NextRequest) {
     const check = await checkRelance(guard.actor, id)
     if (!check.ok) return NextResponse.json({ error: check.error }, { status: check.status })
     const { entry, sender, sentBy } = check
-    const [body, redigee] = await Promise.all([originalBody(id), storedRelance(id)])
+    const redigee = await storedRelance(id)
     return NextResponse.json({
       id,
       sujet: relanceSubject(entry),
-      corps: redigee ? redigee.corps : relanceDraft(entry, body, sender.name),
+      corps: redigee ? redigee.corps : relanceDraft(entry, await relanceSessions(entry), sender),
       redigee: !!redigee,
       statut: RELANCE_STATUS_LABEL[relanceStatus(entry)],
-      corpsOrigineManquant: !body,
       ps: { nom: entry.ps_nom, email: entry.ps_email },
       formation: entry.formation_nom,
       envoyeLe: entry.sent_at,

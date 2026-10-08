@@ -16,7 +16,7 @@ Il ne dépend d'aucune donnée laissée en place : les données nécessaires son
 | Slack | le `slack_user_id` du testeur (les DM de relance n'arrivent qu'à lui) |
 | Fiche commercial de test | « Dethie Faye » (`recubd9fXVX2rkhfB`, `dethie@medere.fr`, owner HubSpot `176772849`, Slack `U05UVHGBURX`, Statut Actif) — la session Google `dethie@medere.fr` est **administrateur** |
 | Node | ≥ 22.18 (exécute `scripts/seed-test.ts` sans dépendance) |
-| Navigateur | session Google @medere.fr ouverte sur `http://localhost:3000` |
+| Navigateur | profil Chrome **« Tests Claude »** (uniquement l'extension Claude), qui apparaît sous le nom **« Browser 1 »** dans `/chrome` ; session Google @medere.fr ouverte sur `http://localhost:3000`. Les tests d'interface et les captures se font dans ce profil (dans l'autre profil, « Browser 2 », les captures échouent). Fenêtre visible à l'écran pendant les tests. |
 
 Variables à exporter pour le script de seed :
 
@@ -218,9 +218,8 @@ Données : `seed --relances` (envois de la fiche Dethie Faye, relance J+3 due : 
 | L0 | Tests Node de `renderMail` (19 cas) | échappement, liens Markdown et URL sans lien imbriqué, ponctuation finale exclue, parenthèses, texte brut |
 | L1 | Recherche de contact (étape 4) | première liste affichée dès la première passe, contacts supplémentaires ajoutés à la suite, ordre conservé, sélection conservée |
 | L2 | Rôle lecteur (`ADMIN_EMAILS` vidé + email de la fiche changé temporairement par le connecteur Airtable) | accueil « pas associé à une fiche commercial » ; `/suivi` lisible, « Relancer » désactivé (« Ton compte ne permet pas… ») ; generate, send, relance (préparer, rédiger, envoyer) → 403 — **tout remettre, relire la fiche, vérifier le diff** |
-| L3 | `GET /api/relance?id=` sur non ouvert / ouvert / cliqué | objet « Relance : votre formation … », introduction propre à chaque statut, mail d'origine sous « Mon précédent message » |
+| L3 | `GET /api/relance?id=` sur non ouvert / ouvert / cliqué | objet « Relance : votre formation … » ; brouillon **identique** pour les 3 statuts (hors date d'envoi), introduction neutre, sessions, 7 étapes, signature ; pas de mail d'origine recopié |
 | L4 | Adresse invalide, indésirable, déjà relancé, inconnu | 409 / 409 / 409 / 404, messages lisibles |
-| L5 | Corps d'origine supprimé (`email_body`) et absent chez Resend | `corpsOrigineManquant: true`, brouillon sans corps d'origine |
 | L6 | Administrateur sur un mail de Zacharie (**préparation seule**) ; même mail en rôle commercial | 200 « au nom de Zacharie » ; 403 « Seul le commercial qui a envoyé ce mail… » (préparer et envoyer) |
 | L7 | Envoi réel `[TEST-L3-A]`, `opened`, puis `/suivi?relance={id}` | fenêtre ouverte directement, pré-remplie « ouvert, sans clic » ; « Rédiger la relance » remplace le texte |
 | L8 | Objet préfixé `[TEST-L3-B]`, « Envoyer la relance » | 200 `in_reply_to: true` ; KV : `relance_id` sur l'origine, relance `kind: relance` + `parent_id`, origine retirée de `relances_due`, `relance_sent` +1 ; Gmail (source) : `In-Reply-To` = `References` = Message-ID de l'origine (Resend), multipart avec texte brut |
@@ -259,13 +258,53 @@ Contrôles par lecture de la page (DOM). Données : `seed --historique` (contact
 | M8 | Fenêtre de relance : ajouter « https:/medere.fr » | avertissement « Adresse mal écrite » |
 | M9 | Performance (production locale) | voir le rapport du lot 5 |
 
+### R. Validation finale avant déploiement (simulation sur la base de test)
+
+Données : `node scripts/seed-test.ts seed-prod` — 90 envois **au format de la production actuelle** (code de `main` : `email_track` minimal, `emails_index`, `relance:*`, aucun compteur ni `meta:schema_version`), 4 commerciaux (dont un nom sans fiche correspondante), 12 envois de test vers le contact de test au nom de plusieurs commerciaux, relance orpheline. Relevé de `/suivi` (6 périodes × équipe, « Mes envois », chaque commercial) à chaque étape. **Aucun envoi.**
+
+| # | Étape | Attendu |
+|---|---|---|
+| R1 | Base non migrée | calcul de secours : indicateurs non nuls sur toutes les périodes ayant des envois ; rattachement des noms identique à la migration |
+| R2 | `--export` | chiffres inchangés |
+| R3 | `purge-test-sends.ts` (rapport puis `--apply`) | uniquement les 12 envois de test et leurs `relance:*` ; total 60 j : 90 → 78 |
+| R4 | `--dry-run`, migration, `--verify` | `/suivi` **identique** avant / après migration ; 0 écart |
+| R5 | `dedupe-hubspot-notes.ts --contact=18421683158` (rapport) | aucun doublon, aucun cas ambigu |
+| R6 | `seed-prod --old-writes` (ancien code encore actif : 3 envois au format ancien + `relance:*`, 6 webhooks ouverture / clic sur des envois migrés dont une ouverture sur un envoi cliqué) | `--verify` signale les envois modifiés ; compteurs en retard sur la liste (attendu dans cette fenêtre) |
+| R7 | Export, `--dry-run`, seconde migration, `--verify` | « 3 à migrer, 6 à rattraper », 0 écart ; statut « cliqué » rétabli, verrou de Note posé ; équipe = liste sur toutes les périodes ; compteurs identiques au calcul de secours (marqueur de migration retiré un instant) |
+| R8 | Bout en bout, dans l'ordre réel | déconnexion / connexion Google, étapes 1 à 6, envoi `[TEST-L6-A]`, ouverture, clic, DM premier clic, `/suivi` filtres et période, export, relance par mail `[TEST-L6-B]`, cron (5 DM dont rattrapage, rien au 2ᵉ passage), révocation (403 en 60 s, retour 200 en 32 s), déconnexion (API redirigées vers `/login`) |
+
+### Q. Page /suivi (lot 4)
+
+Données : `node scripts/seed-test.ts seed-suivi` (60 envois sur ~48 jours, 3 commerciaux, 4 formations, tous les statuts, 16 relances, compteurs journaliers cohérents) et `seed --historique`. Résultats attendus calculés indépendamment en lisant le KV (filtre en Node sur les entrées), puis comparés à `POST /api/suivi`. Production locale. **Aucun envoi.**
+
+| # | Étapes | Attendu |
+|---|---|---|
+| Q1 | 11 combinaisons : 30 j équipe, « Mes envois », un commercial, statut Cliqué, une formation, recherche « helene » et « LEFÈVRE », commercial + statut, 7 j, mois dernier, 60 j | total, ouverts, cliqués et premier envoi identiques au calcul indépendant ; pagination (page 3) dans l'ordre ; facettes formations = total de la période ; `GET /api/suivi` → 405 |
+| Q2 | Indicateurs | « Équipe » et « Mes envois » (compteurs journaliers) égaux aux valeurs calculées sur les entrées |
+| Q3 | Rôles | administrateur : « Mes envois » désactivé par défaut ; commercial (`ADMIN_EMAILS` vidé temporairement) : activé, filtre commercial grisé |
+| Q4 | `TRACKING_RELIABLE_SINCE` fixé temporairement au 20/09/2026 | avertissement sur 30 j et mois dernier, absent sur 7 j ; `null` : jamais |
+| Q5 | Export CSV de la vue | BOM, `text/csv`, 13 colonnes, autant de lignes que de mails dans la vue |
+| Q6 | Onglet caché plus de 60 s, puis de nouveau visible | aucune requête pendant qu'il est caché ; une requête immédiate au retour |
+| Q7 | Temps (repère `data-vue` / `data-etat` sur le tableau) | changement de filtre affiché en moins de 300 ms ; période déjà préchargée : quelques dizaines de ms |
+| Q8 | Captures ordinateur et mobile (390 px) | design zinc, aucun débordement horizontal, nom du PS lisible, ligne ouverte (relance sous le mail d'origine, bouton « Relancer ») |
+
+### P. RGPD : aucune mention du suivi dans les textes envoyés aux PS
+
+Données : `seed --relances`, puis les 3 envois `test-rel-non-ouvert` / `-ouvert` / `-clique` rattachés à une vraie formation (n° 92622525450) avec un corps d'origine à l'ancien parcours ; un brouillon rédigé à l'ancien format (sans `v: 2`) sur `test-rel-ouvert`. **Aucun envoi.**
+
+| # | Étapes | Attendu |
+|---|---|---|
+| P1 | `GET /api/relance` sur les 3 envois | brouillons identiques (hors date d'envoi) ; l'ancien brouillon rédigé est ignoré |
+| P2 | `POST /api/relance/generate` sur les 3 envois | 200 ; aucune formulation interdite (« j'ai vu », « pris connaissance », « avez ouvert », « consulté », « avez lu », « temps de lire », « cliqué », « ouverture »…) ; introduction neutre identique ; 7 étapes dans l'ordre avec la phrase SMS ; sessions et numéro DPC ; signature ; ni « Mon précédent message » ni ancien parcours |
+| P3 | Lecture du code | `generateRelance` ne reçoit plus le statut ni le mail d'origine (`GenerateRelanceParams`) ; `NO_TRACKING_RULE` dans les prompts du mail et de la relance |
+
 ### O. Parcours d'inscription en 7 étapes (code SMS), modèle unique, emails hors des adresses
 
 | # | Étapes | Attendu |
 |---|---|---|
 | O1 | Rédaction réelle, classe virtuelle (aucun envoi) | étapes 1 à 7 dans l'ordre, pas d'étape 8 ; étape 3 = phrase SMS mot pour mot ; conseil sur le numéro de mobile ; numéro DPC à l'étape 5 |
 | O2 | Rédaction réelle, e-learning (aucun envoi) | idem |
-| O3 | Relance d'un mail dont le corps d'origine contient l'ancien parcours en 6 étapes : brouillon (`GET /api/relance`) et rédaction (`POST /api/relance/generate`) | au-dessus de « Mon précédent message » : les 7 étapes à jour + conseil ; le mail d'origine recopié reste tel quel |
+| O3 | Relance d'un mail dont le corps d'origine contient l'ancien parcours en 6 étapes : brouillon (`GET /api/relance`) et rédaction (`POST /api/relance/generate`) | les 7 étapes à jour + conseil ; aucune trace de l'ancien parcours (le mail d'origine n'est plus recopié) |
 | O4 | `grep` des identifiants de modèle dans `app`, `lib`, `components` | uniquement `REDACTION_MODEL` dans `lib/config.ts` |
 | O5 | `GET /api/contact-search` et `GET /api/contact-history` | 405 ; en POST, résultats normaux ; aucune adresse `/api/…` contenant un email pendant le parcours |
 | O6 | Révocation : fiche `recubd9fXVX2rkhfB` → « Plus actif » puis « Actif » (connecteur Airtable), `/api/me` toutes les 2 s | 403 puis 200 dans le délai documenté (README, « Délai maximal de révocation ») ; aucune requête au-delà de 300 ms ; fiche relue « Actif » |

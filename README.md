@@ -85,7 +85,8 @@ medere-agent-email/
 │       ├── generate/route.ts             # Rédaction du mail par Claude au fil de l'eau (NDJSON, + upsell)
 │       ├── send/route.ts                 # Envoi (contrôles) → lib/deliver.ts
 │       ├── relance/route.ts              # Brouillon de relance (GET), generate/ (Claude), send/ (envoi dans le fil)
-│       ├── suivi/route.ts                # API lecture KV pour page suivi
+│       ├── suivi/route.ts                # API de la page suivi (filtres, indicateurs, liste paginée)
+│       ├── suivi/export/route.ts         # Export CSV de la vue filtrée
 │       ├── cron/
 │       │   └── relance/route.ts          # Cron job relances J+3
 │       └── webhooks/
@@ -101,6 +102,7 @@ medere-agent-email/
 │   ├── relance.ts                        # Règles et brouillon de la relance par mail
 │   ├── render-mail.ts                    # Rendu texte → HTML + texte brut, avertissements sur les liens (fonctions pures)
 │   ├── slack.ts                          # DM Slack et alertes techniques
+│   ├── suivi-query.ts                    # Requête de /suivi : filtres, période (Paris), compteurs, script Lua
 │   ├── auth.ts                           # Session JWT (cookie)
 │   ├── claude.ts                         # Génération mail IA
 │   ├── config.ts                         # Constantes (RETENTION_DAYS, seuil des événements automatiques…)
@@ -193,7 +195,9 @@ Si HubSpot ne répond pas, l'app affiche « HubSpot indisponible, ne crée pas l
 **Étape 6 — Confirmation**
 Statuts : mail envoyé ✓, Note HubSpot sur la fiche du PS ✓, relance J+3 ✓.
 
-Toute erreur d'API (Airtable, HubSpot, session expirée…) est affichée dans un bandeau rouge au lieu d'aboutir à une liste vide silencieuse.
+Toute erreur d'API (Airtable, HubSpot, session expirée…) est affichée dans un bandeau d'erreur au lieu d'aboutir à une liste vide silencieuse.
+
+**Design** : toute l'interface (assistant, fenêtre de relance, `/suivi`) est en **zinc monochrome**, sans aucune couleur ni émoji, avec des icônes SVG : erreurs en bandeau gris clair à bordure soutenue (`bg-zinc-50 border-zinc-400`), avertissements (« déjà contacté », liens à vérifier, aucun contact trouvé) en bandeau blanc à bordure grise (`border-zinc-300`). Seule exception : le logo Google de la page de connexion (charte Google).
 
 ---
 
@@ -346,9 +350,10 @@ Une seule fonction, `renderMail` (`lib/render-mail.ts`, sans dépendance), produ
 ### Relance par mail depuis /suivi
 Dans le détail d'un mail, bouton **« Relancer »** (ou lien « Préparer la relance par mail » du DM J+3, qui ouvre `/suivi?relance={resend_id}`). La fenêtre de relance propose :
 - objet `Relance : votre formation {nom de la formation}` ;
-- texte pré-rempli : formule d'appel (« Bonjour {titre} {nom}, »), une introduction adaptée au statut — **non ouvert**, **ouvert sans clic** ou **cliqué** —, la signature, puis « ----- Mon précédent message ----- » et le mail d'origine ;
-- tout est modifiable ; **« Rédiger la relance »** fait rédiger une relance adaptée au statut (même limite de débit que la génération), **une seule fois par mail d'origine** : le bouton disparaît ensuite (« Rédigée · modifiable à la main »), le texte reste modifiable à la main ;
-- corps d'origine : `email_body` (90 jours), sinon redemandé à Resend ; s'il n'est plus disponible, la relance s'ouvre **sans le corps d'origine** avec un message, à compléter ou à faire rédiger par Claude.
+- texte pré-rempli **identique quel que soit le statut du mail d'origine** : formule d'appel (« Bonjour {titre} {nom}, »), introduction neutre (« Je me permets de revenir vers vous concernant la formation … »), prochaines sessions de la formation (cache Airtable, au plus 3), les 7 étapes d'inscription à jour avec le conseil sur le numéro de mobile, puis la signature (nom, email, téléphone de la fiche). **Le mail d'origine n'est pas recopié** (il peut contenir l'ancien parcours en 6 étapes) : la relance se suffit à elle-même ;
+- **RGPD** : aucun texte destiné à un PS (mail, relance rédigée, brouillon) ne mentionne ni ne laisse deviner le suivi des ouvertures et des clics. Le statut (non ouvert, ouvert sans clic, cliqué) n'est visible que du commercial (`/suivi`, DM Slack, Notes HubSpot) et **n'est jamais transmis au prompt** ; les prompts du mail et de la relance contiennent la consigne `NO_TRACKING_RULE` (`lib/dpc-steps.ts`) ;
+- tout est modifiable ; **« Rédiger la relance »** fait rédiger une relance sur le même modèle (introduction neutre, sessions, numéro DPC, 7 étapes, signature ; même limite de débit que la génération), **une seule fois par mail d'origine** : le bouton disparaît ensuite (« Rédigée · modifiable à la main »), le texte reste modifiable à la main ;
+- un brouillon rédigé enregistré avant ce changement (sans `v: 2`) est ignoré : la relance est rédigée de nouveau au format neutre.
 
 Rédaction unique, contrôlée côté serveur (`/api/relance/generate`) :
 - à la première rédaction, le texte de Claude est enregistré dans `relance_draft:{resend_id}` (supprimé avec l'envoi par la purge RGPD) ;
@@ -402,7 +407,19 @@ Vercel → projet → **Cron Jobs** dans le menu gauche → voir le dernier stat
 
 ## Suivi des envois et clés KV
 
-Page accessible à `/suivi` — réservée aux utilisateurs connectés.
+Page accessible à `/suivi` — réservée aux utilisateurs connectés (lecteur compris, en lecture seule).
+
+### Page /suivi
+- **Période** : aujourd'hui, 7 jours, 30 jours (par défaut), ce mois, mois dernier, plage personnalisée (deux champs date). Jours calendaires, heure de Paris. La liste, les indicateurs et l'export suivent la période.
+- **Indicateurs** : bloc « Équipe » toujours visible, à côté du bloc « Mes envois » de la personne connectée (si elle a une fiche) ; mails envoyés (et reçus), taux d'ouverture (N ouverts), taux de clic (N cliqués). Calculés à partir des compteurs journaliers `stats:day` de la période. Au-dessus de la liste, une ligne résume la **vue filtrée** (N mails, ouverts, cliqués).
+- **Filtres** : « Mes envois » (activé par défaut pour un commercial, désactivé pour un administrateur ; absent pour un lecteur, qui n'a pas de fiche), commercial (désactivé quand « Mes envois » est actif), statut (Envoyé, Reçu, Ouvert, Cliqué, Adresse invalide, Indésirable), formation (formations présentes sur la période, avec leur nombre de mails), recherche par nom ou email du PS (sans tenir compte des accents ni des majuscules, appliquée 250 ms après la dernière frappe).
+- **Liste** : statuts et libellés validés ; détail avec dates et compteurs ; relance affichée sous le mail d'origine et bouton « Relancer » (voir « Relances »).
+- **Avertissement de fiabilité** : `TRACKING_RELIABLE_SINCE` (`lib/config.ts`, date AAAA-MM-JJ à renseigner le jour du déploiement ; `null` = aucun avertissement). Pour une période qui commence avant cette date : « Taux d'ouverture antérieurs au JJ/MM/AAAA surestimés (copie commerciale comptée). »
+- **Export CSV** de la vue filtrée (toutes les lignes, sans pagination) : UTF-8 avec BOM, séparateur « ; » (Excel en français), 13 colonnes (date d'envoi, commercial, envoyé par, PS, email, formation, numéro DPC, statut, ouvert le, cliqué le, relance envoyée le, statut de la relance, objet). Les cellules commençant par `= + - @` sont neutralisées (injection de formules).
+- **Actualisation** automatique toutes les minutes, **coupée quand l'onglet est caché** (`visibilitychange`) ; au retour sur l'onglet, une actualisation immédiate.
+- **Réactivité** : la liste affichée reste visible pendant une mise à jour ; les vues déjà vues s'affichent tout de suite puis s'actualisent ; les autres périodes sont préchargées dès le premier affichage.
+
+**API** : `POST /api/suivi` et `POST /api/suivi/export`, corps JSON `{ from, to, mine, commercial, statut, formation, q, page }` (POST : la recherche, qui peut être un email de PS, n'apparaît jamais dans l'adresse de la requête). `facets: 1` renvoie les formations de la période. Logique dans `lib/suivi-query.ts` ; un seul script Lua (`SUIVI_QUERY_SCRIPT`, `lib/kv-schema.ts`) parcourt la période sur `emails_index` (ou `idx:commercial:{clé}`, relances écartées), applique statut, formation et recherche, et renvoie en un aller-retour le total, la page avec ses entrées et ses relances, et les indicateurs de la vue quand un filtre statut, formation ou recherche est actif (sinon, compteurs journaliers). Période limitée à 1 100 jours (au-delà, la purge RGPD a tout supprimé).
 
 ### Clés KV (schéma v2)
 
@@ -411,7 +428,7 @@ Les noms de clés et les scripts Lua sont centralisés dans `lib/kv-schema.ts`. 
 | Clé | Type | Contenu | Expiration | Écrit par |
 |-----|------|---------|------------|-----------|
 | `email_track:{resend_id}` | JSON | Données de l'envoi (détail ci-dessous) | aucune — purge RGPD | `/api/send` (création NX), webhook, migration |
-| `email_body:{resend_id}` | JSON | `{ corps }` du mail, pour pré-remplir une relance | 90 jours (`EMAIL_BODY_TTL_DAYS`) | `/api/send`, migration |
+| `email_body:{resend_id}` | JSON | `{ corps }` du mail — **plus écrit** (anciennes clés seulement) | expire seule (90 jours au plus) | (plus écrit ; supprimé par la purge et `purge-test-sends.ts`) |
 | `email_clicks:{resend_id}` | liste | 20 derniers clics : heure, lien, automatique ou non et raison (`rafale` / `robot`) — ni adresse IP ni navigateur | 7 jours (`CLICK_HISTORY_TTL_DAYS`) | webhook |
 | `emails_index` | sorted set | `resend_id` des envois initiaux, score = date d'envoi (ms) | aucune — purge RGPD | `/api/send` |
 | `idx:commercial:{clé}` | sorted set | Envois d'un commercial (clé = email en minuscules, ou `nom:{slug}` pour un ancien envoi non rattaché) | aucune — purge RGPD | `/api/send`, migration |
@@ -481,13 +498,19 @@ PS (nom + email) · Commercial · Formation · Statut · Envoyé · Lien HubSpot
 Les envois sont conservés **3 ans** : constante `RETENTION_DAYS = 1095` en haut de `lib/config.ts`.
 - Le cron quotidien purge les envois plus anciens : `email_track`, `email_body`, `email_clicks`, `send_result`, verrous `hubspot_note:*`, entrées de `emails_index`, `idx:commercial:*`, `idx:contact:*` et `relances_due` (et la relance rattachée à l'envoi, lot 3). Le nombre d'envois purgés est renvoyé dans `purged`.
 - Les compteurs `stats:day:*` expirent d'eux-mêmes (EXPIREAT fin du jour + `RETENTION_DAYS`).
-- Le corps des mails (`email_body`) n'est gardé que 90 jours (`EMAIL_BODY_TTL_DAYS`) : il ne sert qu'à pré-remplir une relance. **Limite** : pour un mail plus ancien, le corps est redemandé à Resend (`GET /emails/{id}`) ; si Resend ne le fournit plus (durée de conservation de Resend dépassée), la relance s'ouvre **sans le corps d'origine**, avec un message qui l'indique, et le commercial complète le texte ou le fait régénérer par Claude.
+- Le corps des mails (`email_body`) **n'est plus stocké** (minimisation RGPD : plus aucun usage depuis que la relance ne recopie plus le mail d'origine ; ni l'envoi ni la migration ne l'écrivent). Les clés existantes expirent seules (90 jours au plus) ; la purge RGPD et `purge-test-sends.ts` continuent de les supprimer.
 - **Seul le KV est purgé** : les Notes HubSpot ne sont pas concernées.
 
-### Migration des données (schéma v2) — à faire une fois après le déploiement
-Le code fonctionne **avant et après** la migration : avant, les anciennes entrées restent lisibles et les stats sont calculées sur les entrées ; les événements webhook mettent à jour une ancienne entrée sans toucher aux compteurs (la migration la comptera, d'où l'absence de double comptage). La migration reconstruit compteurs et index à partir des `email_track` existants et reprend les clés `relance:*`.
+### Migration des données (schéma v2)
+**Procédure complète de mise en production, pas à pas : [`docs/DEPLOIEMENT.md`](docs/DEPLOIEMENT.md)** (export → purge → migration → `--verify` → mise en ligne → seconde migration → `--verify` → `TRACKING_RELIABLE_SINCE` → dédoublonnage des Notes).
 
-**Procédure de déploiement des données**, sur la base de **production**, juste après le déploiement et **avant le prochain cron de 8h UTC** (le nouveau cron lit `relances_due`). Chaque script affiche d'abord un rapport sans rien modifier : le lire avant de passer à l'écriture.
+Le code fonctionne **avant et après** la migration :
+- **avant** (`meta:schema_version` ≠ 2) : `/suivi` et l'export utilisent un **calcul de secours** sur les envois eux-mêmes (`runLegacyQuery`, `lib/suivi-query.ts`), avec la même règle de rattachement nom → email que la migration et les mêmes règles de comptage : les indicateurs ne sont jamais à zéro, et donnent les mêmes chiffres qu'après migration (vérifié) ;
+- les événements webhook mettent à jour une ancienne entrée sans toucher aux compteurs (la migration la comptera, d'où l'absence de double comptage).
+
+La migration reconstruit compteurs et index à partir des `email_track` existants et reprend les clés `relance:*`. **Seconde migration** (après la mise en ligne) : elle migre les envois faits entre-temps par l'ancien code et **rattrape** les envois déjà migrés que l'ancien code a modifiés (webhook ouverture / clic reçu par l'ancienne version : `first_*` repris, verrou de Note posé pour ne pas recréer la Note, statut remonté s'il a été rétrogradé, fait compté une seule fois — script `CATCHUP_SCRIPT`). `--verify` signale ces envois tant qu'ils ne sont pas rattrapés.
+
+Résumé des commandes (détail et résultats attendus dans `docs/DEPLOIEMENT.md`). Chaque script affiche d'abord un rapport sans rien modifier : le lire avant de passer à l'écriture.
 ```bash
 H=<hôte de la base KV de production>                                   # ex. xxx.upstash.io, vérifié contre KV_REST_API_URL
 
@@ -516,7 +539,7 @@ node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json --confirm 
 Avant l'étape 1 : ajouter `email.delivered`, `email.bounced` et `email.complained` sur l'endpoint du webhook dans Resend (voir « Webhooks Resend »). Les Notes HubSpot archivées à l'étape 5 restent récupérables 90 jours dans la corbeille HubSpot ; la restauration du KV ne les concerne pas.
 - Node ≥ 22.18 (le script TypeScript s'exécute sans compilation ni dépendance).
 - `.env.local` (ou `ENV_FILE=<fichier>`) doit contenir les `KV_REST_API_*` de la base visée, et `AIRTABLE_*`.
-- **Idempotente** : une entrée déjà migrée est ignorée ; relancer la commande ne change rien.
+- **Idempotente** : une entrée déjà migrée est ignorée (sauf rattrapage d'une modification de l'ancien code) ; relancer la commande ne change rien.
 - **Une seule entrée par mail** : la clé est le `resend_id` du mail. Chaque fait (reçu, ouvert, cliqué…) est compté une seule fois grâce aux marqueurs `counted_*`, même si des webhooks arrivent pendant la migration (testé). `--verify` recalcule les compteurs attendus à partir de ces marqueurs, les compare aux `stats:day:*` et contrôle la cohérence fait / comptage ; il sort en erreur au moindre écart.
 - Deux mails réellement envoyés en double (avant l'idempotence) restent **deux** entrées : aucun mail envoyé n'est supprimé ni fusionné.
 

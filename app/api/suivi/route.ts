@@ -1,114 +1,108 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getKv, kvConfigured } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
-import { isMigrated, parisDay, statsFromCounters, statsFromEntries, type Stats } from '@/lib/tracking'
 import { requireActor } from '@/lib/identity'
 import { relanceVerdict } from '@/lib/relance'
+import { TRACKING_RELIABLE_SINCE } from '@/lib/config'
+import { isMigrated } from '@/lib/tracking'
+import { SUIVI_PAGE_SIZE, actorKey, countersFor, needsEntries, parseFilters, runLegacyQuery, runQuery, type SuiviStats } from '@/lib/suivi-query'
 
 // Lecture du KV à chaque appel : jamais de rendu statique au build, jamais de réponse
 // gardée en cache par le navigateur (sinon "Actualiser" peut réafficher d'anciens chiffres)
 export const dynamic = 'force-dynamic'
 const NO_STORE = { 'Cache-Control': 'no-store' }
+const KO = "Le suivi est momentanément indisponible. Réessaie dans quelques instants."
 
-export async function GET(req: NextRequest) {
+// POST /api/suivi, corps JSON { from, to, mine, commercial, statut, formation, q, page, facets? }
+//   - liste paginée des mails (envois initiaux, relance rattachée sous chacun) de la vue filtrée ;
+//   - indicateurs : équipe et personne connectée (compteurs journaliers de la période), et vue
+//     filtrée (compteurs si seuls période et commercial sont filtrés, sinon calculés sur les lignes) ;
+//   - facets=1 : formations présentes sur la période (liste du filtre « Formation »).
+export async function POST(req: NextRequest) {
   // Tout utilisateur connecté (lecteur compris) voit le suivi ; un compte « Plus actif » est refusé
   const guard = await requireActor({ readOnly: true })
   if (!guard.ok) return guard.response
+  const { actor } = guard
+  if (!kvConfigured()) return NextResponse.json({ error: KO }, { status: 500 })
   try {
-    if (!kvConfigured()) {
-      return NextResponse.json({ error: "Le suivi est momentanément indisponible. Réessaie dans quelques instants." }, { status: 500 })
-    }
-
+    const body = await req.json().catch(() => ({}))
+    const f = parseFilters(body, actor)
+    const own = actorKey(actor)
     const kv = getKv()
-    const { searchParams } = new URL(req.url)
-    const page = Math.max(1, parseInt(searchParams.get('page') || '1'))
-    const limit = 20
+    // Base pas encore migrée (meta:schema_version ≠ 2) : calcul de secours sur les envois eux-mêmes
+    const migrated = await isMigrated()
 
-    // Lectures indépendantes lancées ensemble (regroupées en un seul aller-retour par le client
-    // KV) : total, état de la migration, premier envoi et ids de la page courante
-    const start = (page - 1) * limit
-    const [total, migrated, first, pageIds] = await Promise.all([
-      kv.zcard(KEYS.emailsIndex),
-      isMigrated(),
-      kv.zrange(KEYS.emailsIndex, 0, 0, { withScores: true }) as Promise<(string | number)[]>,
-      kv.zrange(KEYS.emailsIndex, start, start + limit - 1, { rev: true }) as Promise<string[]>,
-    ])
-    if (total === 0) {
-      return NextResponse.json({
-        emails: [],
-        total: 0,
-        page: 1,
-        pages: 0,
-        stats: { total: 0, ouverts: 0, cliques: 0 },
-      }, { headers: NO_STORE })
+    if (body?.facets) {
+      const r = !migrated
+        ? await runLegacyQuery({ ...f, statut: '', formation: '', q: '' }, actor, { offset: 0, count: 0, facets: true })
+        : await runQuery({ ...f, statut: '', formation: '', q: '' }, { offset: 0, count: 0, entries: false, facets: true })
+      const formations = (r.formations || []).sort((a, b) => a.nom.localeCompare(b.nom, 'fr'))
+      return NextResponse.json({ formations }, { headers: NO_STORE })
     }
 
-    // Stats depuis le premier envoi : somme des compteurs journaliers une fois la base
-    // migrée (scripts/migrate-kv.ts) ; avant, calculées sur les entrées elles-mêmes.
-    // Données complètes pour la page courante, lues en même temps que les stats.
-    const [counts, pageEntries] = await Promise.all([
-      migrated
-        ? statsFromCounters(parisDay(Number(first[1])), parisDay())
-        : kv.zrange(KEYS.emailsIndex, 0, -1).then((allIds) => mgetEntries(allIds as string[])).then(statsFromEntries),
-      mgetEntries(pageIds, true),
-    ]) as [Stats, Record<string, any>[]]
-
-    const stats = {
-      total: counts.sent,
-      ouverts: counts.opened,
-      cliques: counts.clicked,
-      delivres: counts.delivered,
-      bounces: counts.bounced,
-      plaintes: counts.complained,
+    const keys = Array.from(new Set([own, f.commercial].filter((k): k is string => !!k)))
+    let result: Awaited<ReturnType<typeof runQuery>>
+    let equipe: SuiviStats, perso: SuiviStats | null, vue: SuiviStats
+    let commerciauxMap: Record<string, string>
+    if (migrated) {
+      const [r, counters, names] = await Promise.all([
+        runQuery(f, { offset: (f.page - 1) * SUIVI_PAGE_SIZE, count: SUIVI_PAGE_SIZE, entries: true, facets: false }),
+        countersFor(f.from, f.to, keys),
+        kv.hgetall<Record<string, string>>(KEYS.commerciaux),
+      ])
+      result = r
+      equipe = counters.team
+      perso = own ? counters.byKey[own] : null
+      vue = needsEntries(f) ? r.stats! : f.commercial ? counters.byKey[f.commercial] : counters.team
+      commerciauxMap = names || {}
+    } else {
+      const r = await runLegacyQuery(f, actor, { offset: (f.page - 1) * SUIVI_PAGE_SIZE, count: SUIVI_PAGE_SIZE, facets: false })
+      result = r
+      equipe = r.equipe
+      perso = r.perso
+      vue = r.vue
+      commerciauxMap = Object.fromEntries(r.commerciaux.map((c) => [c.key, c.name]))
     }
 
-    // Relance rattachée à chaque mail, et droit de relancer pour la personne connectée
-    const relanceIds = pageEntries.map((e) => e?.relance_id).filter((x): x is string => !!x)
-    const relances = relanceIds.length ? await mgetEntries(relanceIds, true) : []
-    const relanceById = new Map(relanceIds.map((id, i) => [id, relances[i]]))
-    const emails = pageIds
-      .map((id, i) => {
-        const e = pageEntries[i]
-        if (!e) return null
-        const child = e.relance_id ? relanceById.get(e.relance_id) : null
-        const verdict = relanceVerdict(guard.actor, e)
-        return {
-          resend_id: id,
-          ...e,
-          relance: child ? {
-            resend_id: e.relance_id,
-            statut: child.statut,
-            sent_at: child.sent_at,
-            opened_at: child.first_opened_at || child.opened_at || null,
-            clicked_at: child.first_clicked_at || child.clicked_at || null,
-            sent_by_name: child.sent_by_name || null,
-          } : null,
-          relance_possible: verdict.ok,
-          relance_bloquee: verdict.ok ? null : verdict.error,
-        }
-      })
-      .filter(Boolean)
+    const emails = result.ids.map((id, i) => {
+      const e = result.entries[i]
+      if (!e) return null
+      const child = e.relance_id ? result.children[e.relance_id] : null
+      const verdict = relanceVerdict(actor, e)
+      return {
+        resend_id: id,
+        ...e,
+        relance: child ? {
+          resend_id: e.relance_id,
+          statut: child.statut,
+          sent_at: child.sent_at,
+          opened_at: child.first_opened_at || child.opened_at || null,
+          clicked_at: child.first_clicked_at || child.clicked_at || null,
+          sent_by_name: child.sent_by_name || null,
+        } : null,
+        relance_possible: verdict.ok,
+        relance_bloquee: verdict.ok ? null : verdict.error,
+      }
+    }).filter(Boolean)
+
+    const commerciaux = Object.entries(commerciauxMap)
+      .map(([key, name]) => ({ key, name: String(name || key) }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'fr'))
 
     return NextResponse.json({
       emails,
-      total,
-      page,
-      pages: Math.ceil(total / limit),
-      stats,
+      total: result.total,
+      page: f.page,
+      pages: Math.ceil(result.total / SUIVI_PAGE_SIZE),
+      filtres: { from: f.from, to: f.to, mine: f.mine, commercial: f.commercial, statut: f.statut, formation: f.formation, q: f.q },
+      stats: { equipe, perso, vue },
+      migre: migrated,
+      moi: { role: actor.role, key: own },
+      commerciaux,
+      trackingReliableSince: TRACKING_RELIABLE_SINCE,
     }, { headers: NO_STORE })
   } catch (e: any) {
     console.error('[SUIVI] Erreur:', e.message)
-    return NextResponse.json({ error: "Le suivi est momentanément indisponible. Réessaie dans quelques instants." }, { status: 500 })
+    return NextResponse.json({ error: KO }, { status: 500 })
   }
-}
-
-// MGET par paquets de 500 ; keepNulls garde l'alignement avec la liste d'ids
-async function mgetEntries(ids: string[], keepNulls = false): Promise<Record<string, any>[]> {
-  const kv = getKv()
-  const out: (Record<string, any> | null)[] = []
-  for (let i = 0; i < ids.length; i += 500) {
-    const chunk = ids.slice(i, i + 500)
-    out.push(...(await kv.mget<(Record<string, any> | null)[]>(...chunk.map((id) => KEYS.track(id)))))
-  }
-  return (keepNulls ? out : out.filter(Boolean)) as Record<string, any>[]
 }

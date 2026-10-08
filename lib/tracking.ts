@@ -4,7 +4,6 @@ import {
   CLICK_BURST_SECONDS,
   CLICK_HISTORY_MAX,
   CLICK_HISTORY_TTL_DAYS,
-  EMAIL_BODY_TTL_DAYS,
   RELANCE_DELAY_DAYS,
   RETENTION_DAYS,
   TIMEZONE,
@@ -109,8 +108,8 @@ export async function recordSend(p: RecordSendParams): Promise<RecordSendResult>
       String(now.getTime()),
       p.resendId,
       String(statsExpireAt(sentDay, RETENTION_DAYS)),
-      JSON.stringify({ corps: p.corps }),
-      String(EMAIL_BODY_TTL_DAYS * 86400),
+      '', // corps du mail : plus stocké (minimisation RGPD)
+      '0',
       isRelance ? '' : String(dayStartMs(relanceDate)),
       p.commercial.name || '',
       isRelance ? '0' : '1',
