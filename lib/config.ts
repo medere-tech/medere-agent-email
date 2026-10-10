@@ -79,4 +79,4 @@ export const CONTACT_HISTORY_DAYS = 14
 // clics automatiques écartés). À renseigner le jour du déploiement. Pour une période qui commence
 // avant cette date, /suivi affiche : « Taux d'ouverture antérieurs au JJ/MM/AAAA surestimés (copie
 // commerciale comptée). » null = pas encore renseignée, aucun avertissement.
-export const TRACKING_RELIABLE_SINCE: string | null = null
+export const TRACKING_RELIABLE_SINCE: string | null = '2026-10-10'
