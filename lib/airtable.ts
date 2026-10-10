@@ -1,5 +1,15 @@
+import { AIRTABLE_CACHE_SECONDS, COMMERCIAL_CACHE_SECONDS } from '@/lib/config'
+import { getKv, kvConfigured } from '@/lib/kv'
+import type { Fiche } from '@/lib/roles'
+
 const BASE_ID = process.env.AIRTABLE_BASE_ID!
 const TOKEN = process.env.AIRTABLE_TOKEN!
+
+// Liste des formations proposées à l'étape 2 (getFormationsActives) :
+//   false (comportement actuel, recommandé par Maylis) : formations "Active" avec numéro DPC,
+//         qu'elles aient des sessions à venir ou non.
+//   true  : en plus, uniquement les formations ayant au moins une session qui démarre après aujourd'hui.
+export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 
 const TABLES = {
   formations: 'tblu6nfUIhTQ1cbgk',
@@ -9,10 +19,12 @@ const TABLES = {
   commerciaux: 'tblaDpXcgiNZfcJiO',
 }
 
-async function at(path: string) {
+// fresh: true → pas de cache Next. Obligatoire pour toute requête paginée (voir atAll)
+// et pour le cron (les inscriptions doivent être à jour). Sinon, cache de 60 s.
+async function at(path: string, { fresh = false }: { fresh?: boolean } = {}) {
   const res = await fetch(`https://api.airtable.com/v0/${BASE_ID}${path}`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
-    next: { revalidate: 60 },
+    ...(fresh ? { cache: 'no-store' as const } : { next: { revalidate: 60 } }),
   })
   if (!res.ok) {
     const err = await res.text()
@@ -21,13 +33,129 @@ async function at(path: string) {
   return res.json()
 }
 
-export interface Commercial {
-  id: string
-  hubspot_id: string
-  name: string
-  email: string
-  phone: string
-  slack_user_id: string
+// Charge toutes les pages d'une requête (path doit déjà contenir un "?").
+// Jamais de cache, première page comprise : une page 1 servie depuis le cache porte
+// un offset expiré côté Airtable → 422 LIST_RECORDS_ITERATOR_NOT_AVAILABLE sur la page 2.
+async function atAll(path: string): Promise<any[]> {
+  const records: any[] = []
+  let offset: string | undefined
+  do {
+    const offsetParam = offset ? `&offset=${offset}` : ''
+    const data = await at(`${path}${offsetParam}`, { fresh: true })
+    records.push(...(data.records || []))
+    offset = data.offset
+  } while (offset)
+  return records
+}
+
+// Échappe une valeur insérée entre guillemets dans une formule Airtable
+function formulaString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+// Tables lues en entier (fiches Commerciaux, formations, sessions) : relire toute la table Sessions
+// prend ~3 s (pagination de ~11 pages). Aucune requête n'attend Airtable : on sert TOUJOURS la
+// dernière version connue (mémoire de l'instance, sinon KV partagé entre instances et conservé
+// après un redémarrage), et on la rafraîchit en arrière-plan dès qu'elle a dépassé sa durée de
+// fraîcheur. Seul le tout premier chargement (mémoire et KV vides) attend Airtable ; le
+// préchauffage au démarrage du serveur (instrumentation.ts) l'évite en pratique.
+// Le cron ne passe jamais par ce cache (inscriptions toujours relues).
+type CacheEntry<T> = { at: number; value: T }
+const memoryCache = new Map<string, CacheEntry<unknown>>()
+const refreshing = new Map<string, Promise<unknown>>()
+const KV_PREFIX = 'cache:airtable:'
+// Dernière version connue gardée 30 jours dans le KV (rafraîchie bien avant en usage normal)
+const KV_KEEP_SECONDS = 30 * 86400
+
+// Recharge depuis Airtable (un seul chargement à la fois par table), puis mémoire + KV
+function refresh<T>(key: string, load: () => Promise<T>): Promise<T> {
+  const pending = refreshing.get(key)
+  if (pending) return pending as Promise<T>
+  const promise = (async () => {
+    const value = await load()
+    const entry: CacheEntry<T> = { at: Date.now(), value }
+    memoryCache.set(key, entry)
+    if (kvConfigured()) {
+      try {
+        await getKv().set(KV_PREFIX + key, entry, { ex: KV_KEEP_SECONDS })
+      } catch (e: any) {
+        console.error('[AIRTABLE] Cache KV non enregistré :', e.message)
+      }
+    }
+    return value
+  })()
+  refreshing.set(key, promise)
+  promise.then(() => refreshing.delete(key), () => refreshing.delete(key))
+  return promise
+}
+
+// Sur Vercel, une fonction peut être suspendue dès la réponse envoyée : le rafraîchissement est
+// confié à waitUntil (même mécanisme que @vercel/functions) pour qu'il aille jusqu'au bout.
+function keepAlive(promise: Promise<unknown>) {
+  try {
+    const ctx = (globalThis as any)[Symbol.for('@vercel/request-context')]?.get?.()
+    ctx?.waitUntil?.(promise)
+  } catch {
+    // hors Vercel : le serveur continue de tourner, rien à faire
+  }
+}
+
+function refreshInBackground<T>(key: string, load: () => Promise<T>) {
+  keepAlive(refresh(key, load).catch((e: any) => console.error('[AIRTABLE] Rafraîchissement en arrière-plan impossible (' + key + ') : ' + e.message + ' — dernière version connue conservée')))
+}
+
+async function cached<T>(key: string, load: () => Promise<T>, freshSeconds: number): Promise<T> {
+  let entry = memoryCache.get(key) as CacheEntry<T> | undefined
+  if (!entry && kvConfigured()) {
+    try {
+      const fromKv = await getKv().get<CacheEntry<T>>(KV_PREFIX + key)
+      if (fromKv && typeof fromKv.at === 'number' && 'value' in fromKv) {
+        entry = fromKv
+        memoryCache.set(key, fromKv)
+      }
+    } catch (e: any) {
+      console.error('[AIRTABLE] Cache KV illisible :', e.message)
+    }
+  }
+  if (entry) {
+    if (Date.now() - entry.at >= freshSeconds * 1000) refreshInBackground(key, load)
+    return entry.value
+  }
+  // Tout premier chargement (aucune version connue nulle part)
+  return refresh(key, load)
+}
+
+// Âge des versions servies (en secondes), pour les mesures et le diagnostic
+export function cacheAges(): Record<string, number | null> {
+  const out: Record<string, number | null> = {}
+  for (const key of [FICHES_KEY, FORMATIONS_KEY, SESSIONS_KEY, CATALOGUE_KEY]) {
+    const e = memoryCache.get(key)
+    out[key] = e ? Math.round((Date.now() - e.at) / 1000) : null
+  }
+  return out
+}
+
+const FICHES_KEY = 'fiches:v1'
+const FORMATIONS_KEY = 'formations:v1'
+const SESSIONS_KEY = 'sessions:v1'
+const CATALOGUE_KEY = 'catalogue:v1'
+
+// Toutes les sessions (champs utiles seulement), triées par date de début
+const SESSION_FIELDS = [
+  'session_id', 'Numéro de session', 'Date de début de session', 'Date de fin de session',
+  'Date 1ère soirée CV / Date Présentiel', 'Date 2ème soirée CV', "Date limite d'inscription",
+  'Temps lisible (Webflow)', "Numéro d'action DPC", 'webflow_id',
+]
+
+async function loadAllSessions(): Promise<{ id: string; fields: Record<string, any> }[]> {
+  const fields = SESSION_FIELDS.map((f) => `fields[]=${encodeURIComponent(f)}`).join('&')
+  const sort = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
+  const records = await atAll(`/${TABLES.sessions}?${fields}&${sort}`)
+  return records.map((r: any) => ({ id: r.id, fields: r.fields }))
+}
+
+function allSessionsCached() {
+  return cached(SESSIONS_KEY, loadAllSessions, AIRTABLE_CACHE_SECONDS)
 }
 
 export interface Formation {
@@ -52,87 +180,73 @@ export interface Session {
   formation_id: string
 }
 
-export async function getCommerciauxActifs(): Promise<Commercial[]> {
-  const params = new URLSearchParams({
-    filterByFormula: '{Statut}="Actif"',
-    'fields[]': 'hubspot_id',
-  })
-  // fetch all fields
-  const url = `/${TABLES.commerciaux}?filterByFormula=${encodeURIComponent('{Statut}="Actif"')}&fields[]=hubspot_id&fields[]=email&fields[]=phone&fields[]=slack_user_id&fields[]=hubspot_name`
-  const data = await at(url)
-  return data.records.map((r: any) => ({
+// Toutes les fiches Commerciaux (tous statuts), pour rapprocher la session Google d'une fiche.
+// Dernière version connue, rafraîchie en arrière-plan au-delà de COMMERCIAL_CACHE_SECONDS : une
+// révocation (« Plus actif ») s'applique dès le rafraîchissement suivant (voir README, délai maximal).
+export async function getAllFiches(): Promise<Fiche[]> {
+  return cached(FICHES_KEY, loadFiches, COMMERCIAL_CACHE_SECONDS)
+}
+
+async function loadFiches(): Promise<Fiche[]> {
+  const records = await atAll(
+    `/${TABLES.commerciaux}?fields[]=hubspot_id&fields[]=email&fields[]=phone&fields[]=slack_user_id&fields[]=hubspot_name&fields[]=Statut`
+  )
+  return records.map((r: any) => ({
     id: r.id,
     hubspot_id: r.fields.hubspot_id || '',
     name: r.fields.hubspot_name || '',
     email: r.fields.email || '',
     phone: r.fields.phone || '',
     slack_user_id: r.fields.slack_user_id || '',
+    statut: r.fields.Statut || '',
   }))
 }
 
+// Préchauffage (démarrage du serveur, puis chaque minute sur un serveur qui tourne en continu) :
+// charge la dernière version connue et la rafraîchit si elle n'est plus fraîche.
+export async function warmAirtableCaches(): Promise<void> {
+  await Promise.allSettled([getAllFiches(), getFormationsActives(), allSessionsCached(), catalogueCached()])
+}
+
+// Catalogue des formations actives avec les champs des formations proposées en fin de mail
+async function loadCatalogue(): Promise<{ id: string; fields: Record<string, any> }[]> {
+  const formula = encodeURIComponent('{Statut de la formation}="Active"')
+  const fields = ['Nom de la formation', "Numéro d'action DPC", 'Format', 'Public concerné', 'URL Webflow']
+    .map((f) => `fields[]=${encodeURIComponent(f)}`).join('&')
+  const records = await atAll(`/${TABLES.formations}?filterByFormula=${formula}&${fields}`)
+  return records.map((r: any) => ({ id: r.id, fields: r.fields }))
+}
+
+function catalogueCached() {
+  return cached(CATALOGUE_KEY, loadCatalogue, AIRTABLE_CACHE_SECONDS)
+}
+
 export async function getFormationsActives(): Promise<Formation[]> {
-  // ── OPTION A : formations actives avec numéro DPC ET au moins une session future ──
-  // Décommenter ce bloc et commenter le bloc OPTION A pour activer
-  // Étape 1 : formations actives avec numéro DPC — avec pagination
-  /* const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
-  const allFormationRecords: any[] = []
-  let offsetF: string | undefined 
-  do {
-    const offsetParam = offsetF ? `&offset=${offsetF}` : ''
-    const data = await at(
-      `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}${offsetParam}`
-    )
-    allFormationRecords.push(...(data.records || []))
-    offsetF = data.offset
-  } while (offsetF)
+  return cached(FORMATIONS_KEY, loadFormationsActives, AIRTABLE_CACHE_SECONDS)
+}
 
-  const formations: Formation[] = allFormationRecords.map((r: any) => ({
-    id: r.id,
-    nom: r.fields['Nom de la formation'] || '',
-    numero: String(r.fields["Numéro d'action DPC"] || ''),
-    format: r.fields['Format'] || '',
-    public: r.fields['Public concerné'] || [],
-    statut: 'Active',
-  }))
-
-  // Étape 2 : sessions futures — pagination + sans filtre webflow_id ici
-  const today = new Date().toISOString().split('T')[0]
-  const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
-
-  const allSessionRecords: any[] = []
-  let offsetS: string | undefined
-  do {
-    const offsetParam = offsetS ? `&offset=${offsetS}` : ''
-    const data = await at(
-      `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}${offsetParam}`
-    )
-    allSessionRecords.push(...(data.records || []))
-    offsetS = data.offset
-  } while (offsetS)
-
-  // Étape 3 : formations ayant au moins une session future
-  const avecSessions = new Set<string>(
-    allSessionRecords.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+async function loadFormationsActives(): Promise<Formation[]> {
+  // Formations actives avec numéro DPC (voir FORMATIONS_REQUIRE_FUTURE_SESSION en haut du fichier)
+  const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
+  const allFormationRecords = await atAll(
+    `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}`
   )
 
-  return formations.filter((f) => avecSessions.has(f.id))*/
-
-
-  // ── OPTION B : formations actives avec numéro DPC uniquement (recommandé par Maylis) ──
-  // Pour activer : commenter le bloc OPTION B au-dessus et décommenter ce bloc
-  const formula = encodeURIComponent('AND({Statut de la formation}="Active", {Numéro d\'action DPC}!="")')
-  const allFormationRecords: any[] = []
-  let offsetF: string | undefined
-  do {
-    const offsetParam = offsetF ? `&offset=${offsetF}` : ''
-    const data = await at(
-      `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}${offsetParam}`
+  let records = allFormationRecords
+  if (FORMATIONS_REQUIRE_FUTURE_SESSION) {
+    // Uniquement les formations liées à au moins une session qui démarre après aujourd'hui
+    const today = new Date().toISOString().split('T')[0]
+    const sessionsFormula = encodeURIComponent(`IS_AFTER({Date de début de session}, "${today}")`)
+    const futureSessions = await atAll(
+      `/${TABLES.sessions}?filterByFormula=${sessionsFormula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
     )
-    allFormationRecords.push(...(data.records || []))
-    offsetF = data.offset
-  } while (offsetF)
+    const avecSessions = new Set<string>(
+      futureSessions.flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+    )
+    records = allFormationRecords.filter((r: any) => avecSessions.has(r.id))
+  }
 
-  return allFormationRecords.map((r: any) => ({
+  return records.map((r: any) => ({
     id: r.id,
     nom: r.fields['Nom de la formation'] || '',
     numero: String(r.fields["Numéro d'action DPC"] || ''),
@@ -143,34 +257,9 @@ export async function getFormationsActives(): Promise<Formation[]> {
 }
 
 export async function getSessionsByFormation(formationRecordId: string, formationFormat: string = ''): Promise<Session[]> {
-  // Fetch all sessions with pagination, filter client-side
-  // Reason: ARRAYJOIN on linked record fields returns primary field values (not record IDs),
-  // so FIND("recXXX", ...) never matches in Airtable formulas.
-  const fields = [
-    encodeURIComponent('session_id'),
-    encodeURIComponent('Numéro de session'),
-    encodeURIComponent('Date de début de session'),
-    encodeURIComponent('Date de fin de session'),
-    encodeURIComponent("Date 1ère soirée CV / Date Présentiel"),
-    encodeURIComponent('Date 2ème soirée CV'),
-    encodeURIComponent("Date limite d'inscription"),
-    encodeURIComponent('Temps lisible (Webflow)'),
-    encodeURIComponent("Numéro d'action DPC"),
-    encodeURIComponent('webflow_id'),
-  ].map(f => `fields[]=${f}`).join('&')
-
-  const sort = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
-
-  // Paginate through all records
-  const allRecords: any[] = []
-  let offset: string | undefined
-
-  do {
-    const offsetParam = offset ? `&offset=${offset}` : ''
-    const data = await at(`/${TABLES.sessions}?${fields}&${sort}${offsetParam}`)
-    allRecords.push(...(data.records || []))
-    offset = data.offset
-  } while (offset)
+  // Toute la table Sessions (en cache), filtrée ici : dans une formule Airtable, ARRAYJOIN d'un
+  // champ lié renvoie le champ principal (pas l'ID du record), FIND("recXXX", …) ne trouve rien.
+  const allRecords = await allSessionsCached()
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -216,83 +305,143 @@ export async function getSessionsByFormation(formationRecordId: string, formatio
     }))
 }
 
-export async function getFormationsDejaFaites(rpps: string, email: string): Promise<string[]> {
-  // Returns formation record IDs already completed by this PS
+// Formations déjà suivies par un PS (record IDs), pour ne pas les lui proposer en fin de mail.
+// Gardées 10 minutes (mémoire + KV, clé = empreinte de l'email et du RPPS) et pré-calculées dès
+// que le contact est choisi à l'étape 4 (prefetchFormationsDejaFaites) : la rédaction du mail
+// n'attend pas les requêtes Clients / Inscriptions. Non bloquant : en cas d'erreur, on n'exclut rien.
+const DEJA_FAITES_SECONDS = 600
+const dejaFaitesMemory = new Map<string, { at: number; value: string[] }>()
+const dejaFaitesInflight = new Map<string, Promise<string[]>>()
 
+// Empreinte SHA-256 (Web Crypto) : ni l'email ni le RPPS n'apparaissent dans le nom de la clé
+async function dejaFaitesKey(rpps: string, email: string): Promise<string> {
+  const data = new TextEncoder().encode(`${String(rpps).trim()}|${String(email).trim().toLowerCase()}`)
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', data))
+  const id = Array.from(digest.slice(0, 16), (b) => b.toString(16).padStart(2, '0')).join('')
+  return `cache:deja_faites:${id}`
+}
+
+export async function getFormationsDejaFaites(rpps: string, email: string): Promise<string[]> {
+  if (!rpps && !email) return []
+  const key = await dejaFaitesKey(rpps, email)
+  const mem = dejaFaitesMemory.get(key)
+  if (mem && Date.now() - mem.at < DEJA_FAITES_SECONDS * 1000) return mem.value
+  const pending = dejaFaitesInflight.get(key)
+  if (pending) return pending
+  const promise = (async () => {
+    if (kvConfigured()) {
+      try {
+        const fromKv = await getKv().get<{ at: number; value: string[] }>(key)
+        if (fromKv && Array.isArray(fromKv.value)) {
+          dejaFaitesMemory.set(key, fromKv)
+          return fromKv.value
+        }
+      } catch (e: any) {
+        console.error('[UPSELL] Cache KV illisible :', e.message)
+      }
+    }
+    try {
+      const value = await fetchFormationsDejaFaites(rpps, email)
+      const entry = { at: Date.now(), value }
+      dejaFaitesMemory.set(key, entry)
+      if (kvConfigured()) await getKv().set(key, entry, { ex: DEJA_FAITES_SECONDS }).catch(() => {})
+      return value
+    } catch (e) {
+      console.error('[UPSELL] Erreur dans getFormationsDejaFaites:', e)
+      return []
+    }
+  })()
+  dejaFaitesInflight.set(key, promise)
+  promise.finally(() => dejaFaitesInflight.delete(key))
+  return promise
+}
+
+// Lancé sans attendre (étape 4) : le résultat sera prêt quand le commercial lancera la rédaction
+export function prefetchFormationsDejaFaites(rpps: string, email: string): void {
+  if (!rpps && !email) return
+  keepAlive(getFormationsDejaFaites(rpps, email))
+}
+
+// Version qui lève les erreurs Airtable (utilisée telle quelle par le cron).
+async function fetchFormationsDejaFaites(
+  rpps: string,
+  email: string,
+  opts: { fresh?: boolean } = {}
+): Promise<string[]> {
   if (!rpps && !email) {
     return []
   }
 
-  try {
-    let rppsValue = rpps
+  let rppsValue = rpps
 
-    if (!rppsValue && email) {
-      const formula = encodeURIComponent(`{email}="${email}"`)
-      const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`)
-      if (data.records?.length) {
-        rppsValue = data.records[0].fields['RPPS'] || ''
-      } else {
-      }
+  // Pas de RPPS sur le contact HubSpot → on le retrouve via la table Clients
+  if (!rppsValue && email) {
+    const formula = encodeURIComponent(`{email}="${formulaString(email)}"`)
+    const data = await at(`/${TABLES.clients}?filterByFormula=${formula}&fields[]=RPPS&maxRecords=1`, opts)
+    if (data.records?.length) {
+      rppsValue = data.records[0].fields['RPPS'] || ''
     }
+  }
 
-    if (!rppsValue) {
-      return []
-    }
-
-    
-    const inscFormula = encodeURIComponent(`FIND("${rppsValue}", ARRAYJOIN({RPPS}, ","))`)
-    const inscData = await at(
-      `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
-    )
-
-    const inscriptions = inscData.records || []
-    console.log('[UPSELL] Inscriptions trouvées:', inscriptions.length)
-
-    if (!inscriptions.length) {
-      console.log('[UPSELL] Aucune inscription → retourne []')
-      return []
-    }
-
-    const sessionIds: string[] = inscriptions
-      .flatMap((r: any) => r.fields['session_id'] || [])
-      .filter(Boolean)
-
-    
-
-    if (!sessionIds.length) {
-      return []
-    }
-
-    const allSessions: any[] = []
-    let offset: string | undefined
-    do {
-      const offsetParam = offset ? `&offset=${offset}` : ''
-      const data = await at(
-        `/${TABLES.sessions}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}${offsetParam}`
-      )
-      allSessions.push(...(data.records || []))
-      offset = data.offset
-    } while (offset)
-
-    console.log('[UPSELL] Total sessions chargées:', allSessions.length)
-
-    const matchingSessions = allSessions.filter((r: any) => {
-      const sid = r.fields['session_id']
-      return sid && sessionIds.includes(sid)
-    })
-
-
-    const formationIds: string[] = matchingSessions
-      .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
-      .filter(Boolean)
-
-    const unique = Array.from(new Set(formationIds))
-
-    return unique
-  } catch (e) {
-    console.error('[UPSELL] Erreur dans getFormationsDejaFaites:', e)
+  if (!rppsValue) {
     return []
   }
+
+  const inscFormula = encodeURIComponent(`FIND("${formulaString(String(rppsValue))}", ARRAYJOIN({RPPS}, ","))`)
+  const inscriptions = await atAll(
+    `/${TABLES.inscriptions}?filterByFormula=${inscFormula}&fields[]=${encodeURIComponent('session_id')}`
+  )
+
+  if (!inscriptions.length) {
+    return []
+  }
+
+  const sessionIds: string[] = inscriptions
+    .flatMap((r: any) => r.fields['session_id'] || [])
+    .filter(Boolean)
+
+  if (!sessionIds.length) {
+    return []
+  }
+
+  // Correspondance session → formation : le cron (fresh) relit Airtable, la génération utilise le cache
+  const allSessions = opts.fresh
+    ? await atAll(`/${TABLES.sessions}?fields[]=${encodeURIComponent('session_id')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`)
+    : await allSessionsCached()
+
+  const matchingSessions = allSessions.filter((r: any) => {
+    const sid = r.fields['session_id']
+    return sid && sessionIds.includes(sid)
+  })
+
+  // Dans la table Sessions, "Numéro d'action DPC" est un champ lié → IDs de records formation
+  const formationIds: string[] = matchingSessions
+    .flatMap((r: any) => r.fields["Numéro d'action DPC"] || [])
+    .filter(Boolean)
+
+  return Array.from(new Set(formationIds))
+}
+
+// Le PS est-il inscrit à une session de la formation portant ce numéro DPC ?
+// Lève une erreur si Airtable ne répond pas correctement (le cron décide quoi faire).
+export async function isPsInscritAFormation(
+  rpps: string,
+  email: string,
+  formationNumero: string
+): Promise<boolean> {
+  if (!formationNumero) return false
+
+  const dejaFaites = await fetchFormationsDejaFaites(rpps, email, { fresh: true })
+  if (!dejaFaites.length) return false
+
+  // Numéro DPC → record ID(s) de la formation (la relance ne stocke que le numéro)
+  // &"" force la comparaison en texte, que le champ soit de type nombre ou texte
+  const formula = encodeURIComponent(`({Numéro d'action DPC}&"")="${formulaString(String(formationNumero))}"`)
+  const formations = await atAll(
+    `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent("Numéro d'action DPC")}`
+  )
+
+  return formations.some((f: any) => dejaFaites.includes(f.id))
 }
 
 export interface FormationUpsell {
@@ -311,25 +460,16 @@ export async function getFormationsUpsell(
 ): Promise<FormationUpsell[]> {
   if (!publicConcerne.length) return []
 
-  // ── Étape 1 : charger les formations actives du même public ──────────────
-  const orConditions = publicConcerne
-    .map((p) => `FIND("${p}", ARRAYJOIN({Public concerné}, ","))`)
-    .join(',')
-  const formulaFormations = encodeURIComponent(
-    `AND({Statut de la formation}="Active", OR(${orConditions}))`
-  )
-  const formationsData = await at(
-    `/${TABLES.formations}?filterByFormula=${formulaFormations}` +
-    `&fields[]=${encodeURIComponent('Nom de la formation')}` +
-    `&fields[]=${encodeURIComponent("Numéro d'action DPC")}` +
-    `&fields[]=${encodeURIComponent('Format')}` +
-    `&fields[]=${encodeURIComponent('Public concerné')}` +
-    `&fields[]=${encodeURIComponent('URL Webflow')}`
-  )
+  // ── Étape 1 : formations actives du même public (catalogue en cache, sans attente Airtable) ──
+  // Même règle que l'ancienne formule FIND("public", ARRAYJOIN({Public concerné}, ","))
+  const formationsRecords = (await catalogueCached()).filter((r) => {
+    const joined = (r.fields['Public concerné'] || []).join(',')
+    return publicConcerne.some((p) => joined.includes(p))
+  })
 
   // Map rapide formation_id → metadata
   const formationsMap = new Map<string, { nom: string; format: string; url_webflow: string }>()
-  for (const r of formationsData.records || []) {
+  for (const r of formationsRecords) {
     formationsMap.set(r.id, {
       nom: r.fields['Nom de la formation'] || '',
       format: r.fields['Format'] || '',
@@ -344,7 +484,7 @@ export async function getFormationsUpsell(
         if (id === formationIdCourante) return false
         if (dejaFaites.includes(id)) return false
         if (specialitePS) {
-          const rec = formationsData.records.find((r: any) => r.id === id)
+          const rec = formationsRecords.find((r: any) => r.id === id)
           const publics: string[] = rec?.fields['Public concerné'] || []
           // On normalise tirets et espaces avant de comparer
           const normalize = (s: string) => s.toLowerCase().replace(/[-\s]+/g, ' ').trim()
@@ -360,27 +500,12 @@ export async function getFormationsUpsell(
 
   if (!eligibles.size) return []
 
-  // ── Étape 2 : charger toutes les sessions qui démarrent APRÈS la fin des sessions du PS ──
-  // On ne charge que les sessions futures pertinentes — gain de performance vs charger 1063 sessions
-  const formulaSessions = encodeURIComponent(
-    `IS_AFTER({Date de début de session}, "${dateFinSessionsPS}")`
-  )
-  const sortParam = `sort[0][field]=${encodeURIComponent('Date de début de session')}&sort[0][direction]=asc`
-  const sessionFields = [
-    `fields[]=${encodeURIComponent('Date de début de session')}`,
-    `fields[]=${encodeURIComponent("Numéro d'action DPC")}`,
-  ].join('&')
-
-  const futureSessions: any[] = []
-  let offset: string | undefined
-  do {
-    const offsetParam = offset ? `&offset=${offset}` : ''
-    const data = await at(
-      `/${TABLES.sessions}?filterByFormula=${formulaSessions}&${sessionFields}&${sortParam}${offsetParam}`
-    )
-    futureSessions.push(...(data.records || []))
-    offset = data.offset
-  } while (offset)
+  // ── Étape 2 : sessions qui démarrent APRÈS la fin des sessions du PS (table Sessions en cache,
+  // déjà triée par date de début croissante) ; équivalent de IS_AFTER(date de début, dateFin)
+  const futureSessions = (await allSessionsCached()).filter((r) => {
+    const debut = String(r.fields['Date de début de session'] || '').slice(0, 10)
+    return !!debut && debut > dateFinSessionsPS.slice(0, 10)
+  })
 
   // ── Étape 3 : pour chaque formation éligible, trouver la prochaine session disponible ──
   // Map<formationId, prochaine_date_ISO>
@@ -417,25 +542,8 @@ export async function getFormationsUpsell(
 
   return candidates
 }
-
-// Kept for backward compatibility — not used in upsell anymore
-export async function getFormationsParPublic(publicConcerne: string[]): Promise<Formation[]> {
-  if (!publicConcerne.length) return []
-  const orConditions = publicConcerne
-    .map((p) => `FIND("${p}", ARRAYJOIN({Public concerné}, ","))`)
-    .join(',')
-  const formula = encodeURIComponent(
-    `AND({Statut de la formation}="Active", OR(${orConditions}))`
-  )
-  const data = await at(
-    `/${TABLES.formations}?filterByFormula=${formula}&fields[]=${encodeURIComponent('Nom de la formation')}&fields[]=${encodeURIComponent("Numéro d'action DPC")}&fields[]=${encodeURIComponent('Format')}&fields[]=${encodeURIComponent('Public concerné')}`
-  )
-  return data.records.map((r: any) => ({
-    id: r.id,
-    nom: r.fields['Nom de la formation'] || '',
-    numero: String(r.fields["Numéro d'action DPC"] || ''),
-    format: r.fields['Format'] || '',
-    public: r.fields['Public concerné'] || [],
-    statut: 'Active',
-  }))
+// Préchauffe le cache des sessions (appelé à l'arrivée sur l'assistant) : le choix d'une
+// formation à l'étape 3 n'attend plus le chargement complet de la table.
+export async function warmSessionsCache(): Promise<number> {
+  return (await allSessionsCached()).length
 }

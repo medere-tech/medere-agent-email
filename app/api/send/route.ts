@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { Resend } from 'resend'
-import { logEmailActivity } from '@/lib/hubspot'
-
-const resend = new Resend(process.env.RESEND_API_KEY!)
+import { requireActor, senderFor } from '@/lib/identity'
+import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
+import { deliverMail } from '@/lib/deliver'
 
 interface SendPayload {
-  commercial: {
-    name: string
-    email: string
-    hubspot_id: string
-    slack_user_id: string
-  }
+  // Fiche Airtable du commercial choisi à l'étape 1 : seul un administrateur peut en désigner
+  // une autre que la sienne. Nom, email, HubSpot et Slack sont relus côté serveur.
+  commercial_id?: string
   ps: {
     id: string          // HubSpot contact ID
     titre: string
@@ -25,125 +21,45 @@ interface SendPayload {
   }
   sujet: string
   corps: string
+  // Clé d'idempotence générée côté client à l'étape 5 : un double clic ou un
+  // renvoi après timeout renvoie le même email_id au lieu d'un second mail.
+  idempotencyKey?: string
 }
 
 export async function POST(req: NextRequest) {
   try {
+    // Identité relue côté serveur : aucun commercial venant du navigateur n'est cru
+    const guard = await requireActor()
+    if (!guard.ok) return guard.response
+    const { actor } = guard
+
     const payload: SendPayload = await req.json()
-    const { commercial, ps, formation, sujet, corps } = payload
+    const { ps, formation, sujet, corps } = payload
 
-    if (!ps.email) {
-      return NextResponse.json({ error: 'Email du PS manquant' }, { status: 400 })
+    const resolved = senderFor(actor, payload.commercial_id)
+    if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: resolved.status })
+    const sender = resolved.sender
+
+    const limit = await checkRateLimit('send', actor.email)
+    if (!limit.ok) return NextResponse.json({ error: rateLimitMessage('send', limit.retryAfterSeconds) }, { status: 429 })
+
+    if (!ps?.email) {
+      return NextResponse.json({ error: "Ce contact n'a pas d'adresse email dans HubSpot." }, { status: 400 })
     }
 
-    const domain = process.env.RESEND_FROM_DOMAIN || 'medere.fr'
-    const fromName = commercial.name
-    const fromEmail = `${commercial.name.toLowerCase().split(' ')[0]}@${domain}`
-
-    // 1. Envoyer l'email via Resend
-    let emailSent = false
-    let resendId: string | undefined
-
-    try {
-      const { data, error } = await resend.emails.send({
-        from: `${fromName} – Médéré <reply@${domain}>`,
-        replyTo: commercial.email,
-        to: [ps.email],
-        subject: sujet,
-        html: corps
-          .replace(/\n/g, '<br>')
-          // Convertir les liens Markdown [texte](url) en balises ahrefs <a>
-          .replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g, '<a href="$2">$1</a>')
-          // Convertir les URLs brutes restantes en balises <a>
-          .replace(/(^|[\s<br>])(https?:\/\/[^\s<]+)/g, '$1<a href="$2">$2</a>')
-          // Convertir les URLs brutes commençant par www.
-          .replace(/(^|[\s<br>])(www\.[^\s<]+)/g, '$1<a href="https://$2">$2</a>'),
-        bcc: [commercial.email],
-      })
-
-      if (error) throw new Error(error.message)
-      emailSent = true
-      resendId = data?.id
-
-      // Ajouter juste après :
-    if (resendId && process.env.KV_REST_API_URL) {
-      const { kv } = await import('@vercel/kv')
-      await kv.set(
-        `email_track:${resendId}`,
-        {
-          contact_id: ps.id,
-          ps_nom: `${ps.titre} ${ps.prenom} ${ps.nom}`.trim(),
-          ps_email: ps.email,
-          commercial_name: commercial.name,
-          formation_nom: formation.nom,
-          sujet,
-          statut: 'envoyé',
-          sent_at: new Date().toISOString(),
-          opened_at: null,
-          clicked_at: null,
-        },        
-      )
-      await kv.zadd('emails_index', { score: Date.now(), member: resendId })
-    }
-    } catch (e: any) {
-      console.error('Resend error:', e.message)
-      // Continue — log HubSpot even if send fails, surface the error
-      return NextResponse.json({
-        success: false,
-        error: `Erreur envoi email : ${e.message}`,
-      }, { status: 500 })
-    }
-
-    // 2. Logger dans HubSpot (si scope disponible)
-    const hubspotResult = await logEmailActivity({
-      contactId: ps.id,
-      hubspotOwnerId: commercial.hubspot_id,
-      subject: sujet,
-      body: corps,
-      toEmail: ps.email,
-      fromEmail: commercial.email,
-      fromName: commercial.name,
+    const { status, body } = await deliverMail({
+      commercial: { name: sender.name, email: sender.email, hubspot_id: sender.hubspot_id, slack_user_id: sender.slack_user_id },
+      ps,
+      formation,
+      sujet,
+      corps,
+      idempotencyKey: payload.idempotencyKey,
+      // Administrateur agissant au nom d'un autre commercial : tracé dans le suivi et la Note HubSpot
+      sentBy: resolved.onBehalf ? { email: actor.email, name: actor.name } : undefined,
     })
-
-    // 3. Stocker pour relance J+3
-    const relanceDate = new Date()
-    relanceDate.setDate(relanceDate.getDate() + 3)
-
-    let relanceStored = false
-    try {
-      if (process.env.KV_REST_API_URL) {
-        const { kv } = await import('@vercel/kv')
-        const key = `relance:${Date.now()}`
-        await kv.set(key, {
-          commercial_slack_id: commercial.slack_user_id,
-          commercial_name: commercial.name,
-          ps_nom: `${ps.titre} ${ps.prenom} ${ps.nom}`,
-          ps_email: ps.email,
-          ps_rpps: ps.rpps || '',
-          ps_hubspot_id: ps.id,
-          formation_nom: formation.nom,
-          formation_numero: formation.numero,
-          sujet,
-          corps,
-          sent_at: new Date().toISOString(),
-          relance_at: relanceDate.toISOString().split('T')[0],
-        }, { exat: Math.floor(relanceDate.getTime() / 1000) + 86400 * 4 }) // expire J+4
-        relanceStored = true
-      }
-    } catch (e) {
-      console.error('KV store error:', e)
-    }
-
-    return NextResponse.json({
-      success: true,
-      resend_id: resendId,
-      hubspot_logged: hubspotResult.success,
-      hubspot_disabled: hubspotResult.disabled,
-      relance_stored: relanceStored,
-      relance_date: relanceDate.toISOString().split('T')[0],
-    })
+    return NextResponse.json(body, { status })
   } catch (e: any) {
     console.error('Send error:', e)
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    return NextResponse.json({ error: "Le mail n'a pas pu être envoyé. Réessaie dans quelques instants ; si le problème persiste, préviens Déthié." }, { status: 500 })
   }
 }

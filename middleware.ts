@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { jwtVerify } from 'jose'
 
-const SECRET = new TextEncoder().encode(process.env.NEXTAUTH_SECRET!)
 const COOKIE_NAME = 'medere_session'
 
 const PUBLIC_PATHS = ['/login', '/api/auth', '/api/webhooks', '/api/cron']
@@ -18,6 +17,14 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next()
   }
 
+  // Sans secret, aucune session ne peut être vérifiée : échec explicite plutôt
+  // qu'une vérification avec une clé vide
+  const secret = process.env.NEXTAUTH_SECRET
+  if (!secret) {
+    console.error('[AUTH] NEXTAUTH_SECRET manquant — accès refusé à', pathname)
+    return NextResponse.json({ error: 'Service momentanément indisponible. Préviens Déthié.' }, { status: 500 })
+  }
+
   // Vérifier le cookie de session
   const token = req.cookies.get(COOKIE_NAME)?.value
 
@@ -26,7 +33,7 @@ export async function middleware(req: NextRequest) {
   }
 
   try {
-    await jwtVerify(token, SECRET)
+    await jwtVerify(token, new TextEncoder().encode(secret))
     return NextResponse.next()
   } catch {
     // Token invalide ou expiré

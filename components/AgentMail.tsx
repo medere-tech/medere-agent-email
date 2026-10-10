@@ -1,14 +1,52 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { linkWarnings, renderMail } from '@/lib/render-mail'
+import { parseGeneratedMail } from '@/lib/generated-mail'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-interface Commercial { id: string; hubspot_id: string; name: string; email: string; phone: string; slack_user_id: string }
+// Fiche commercial (id Airtable) : le serveur relit nom, email, HubSpot et Slack à partir de l'id
+interface Commercial { id: string; name: string; email: string }
+// Personne connectée (rôle déterminé côté serveur)
+interface Me { email: string; name: string; role: 'admin' | 'commercial' | 'lecteur'; commercial: Commercial | null }
 interface Formation { id: string; nom: string; numero: string; format: string; public: string[] }
 interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string }
 interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
 
+// Envoi récent au même contact (alerte « déjà contacté » de l'étape 4)
+interface HistoryItem { relance: boolean; commercial: string; envoyeLe: string; formation: string; statut: string }
+
 type Step = 1 | 2 | 3 | 4 | 5 | 6
+
+const SESSION_EXPIRED = 'Session expirée, reconnecte-toi.'
+
+// fetch + contrôle de res.ok. Lève une erreur lisible si la réponse est en erreur
+// ou n'est pas du JSON (ex. session expirée : le middleware redirige vers /login).
+async function fetchJson(url: string, init?: RequestInit) {
+  let res: Response
+  try {
+    res = await fetch(url, init)
+  } catch {
+    throw new Error('Connexion impossible. Vérifie ta connexion internet puis réessaie.')
+  }
+  if (res.redirected && new URL(res.url).pathname === '/login') {
+    throw new Error(SESSION_EXPIRED)
+  }
+  let data: any
+  try {
+    data = await res.json()
+  } catch {
+    throw new Error('Une erreur est survenue. Réessaie dans quelques instants.')
+  }
+  if (!res.ok) throw new Error(data?.error || 'Une erreur est survenue. Réessaie dans quelques instants.')
+  return data
+}
+
+// Message d'erreur de chargement lisible : le détail technique reste dans les journaux du serveur
+function loadError(e: any, what: string): string {
+  if (e?.message === SESSION_EXPIRED) return SESSION_EXPIRED
+  return `Impossible de charger ${what}. Réessaie dans quelques instants.`
+}
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
 const Icons = {
@@ -72,6 +110,12 @@ const Icons = {
   Loader: () => (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="animate-spin">
       <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" strokeDasharray="28" strokeDashoffset="10"/>
+    </svg>
+  ),
+  Logout: () => (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+      <path d="M6 2.5H3.5C2.95 2.5 2.5 2.95 2.5 3.5V12.5C2.5 13.05 2.95 13.5 3.5 13.5H6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+      <path d="M10.5 11L13.5 8L10.5 5M13.5 8H6.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
     </svg>
   ),
 }
@@ -214,6 +258,17 @@ export default function AgentMail() {
   // Mail
   const [mailSujet, setMailSujet] = useState('')
   const [mailCorps, setMailCorps] = useState('')
+  // Clé d'idempotence de l'envoi : créée à l'arrivée en étape 5, réutilisée pour
+  // tout renvoi de ce mail (double clic, timeout) → Resend ne l'envoie qu'une fois.
+  const [idempotencyKey, setIdempotencyKey] = useState('')
+  const sendingRef = useRef(false)
+  // Rédaction en cours (texte affiché au fil de l'eau) ; annulable par « Retour »
+  const [generating, setGenerating] = useState(false)
+  const genAbortRef = useRef<AbortController | null>(null)
+  // Étape 5 : texte modifiable ou aperçu du mail tel que reçu
+  const [view, setView] = useState<'texte' | 'apercu'>('texte')
+  // Envois récents au contact choisi (null = pas encore vérifié)
+  const [history, setHistory] = useState<{ contactId: string; jours: number; envois: HistoryItem[]; failed: boolean } | null>(null)
 
   // UI states
   const [loading, setLoading] = useState(false)
@@ -221,26 +276,47 @@ export default function AgentMail() {
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [contactSearch, setContactSearch] = useState('')
   const [contactSearching, setContactSearching] = useState(false)
+  const [contactSearchFailed, setContactSearchFailed] = useState(false)
   const [sendResult, setSendResult] = useState<any>(null)
   const [error, setError] = useState('')
+  // Personne connectée ; blocked = accès refusé (compte désactivé, session expirée…)
+  const [me, setMe] = useState<Me | null>(null)
+  const [blocked, setBlocked] = useState('')
 
-  // Load commerciaux on mount
+  // Au chargement : rôle de la personne connectée, puis préchargements (formations, liste des
+  // commerciaux pour un administrateur, cache des sessions côté serveur) pour que chaque étape
+  // s'affiche sans attente.
   useEffect(() => {
-    fetch('/api/commerciaux')
-      .then((r) => r.json())
-      .then((d) => setCommerciauxList(d.commerciaux || []))
+    fetchJson('/api/me')
+      .then((m: Me) => {
+        setMe(m)
+        if (m.role === 'lecteur') return
+        if (m.commercial) setCommercial(m.commercial)
+        fetchJson('/api/sessions?warm=1').catch(() => {})
+        if (m.role === 'admin') {
+          fetchJson('/api/commerciaux')
+            .then((d) => setCommerciauxList(d.commerciaux || []))
+            .catch((e) => setError(loadError(e, 'la liste des commerciaux')))
+        }
+        setLoadingFormations(true)
+        fetchJson('/api/formations')
+          .then((d) => setFormationsList(d.formations || []))
+          .catch((e) => setError(loadError(e, 'la liste des formations')))
+          .finally(() => setLoadingFormations(false))
+      })
+      .catch((e) => setBlocked(e.message))
   }, [])
 
-  // Load formations when step 2
+  // Formations pas encore chargées (préchargement en échec) : nouvel essai à l'étape 2
   useEffect(() => {
-    if (step === 2 && formations.length === 0) {
+    if (step === 2 && formations.length === 0 && !loadingFormations) {
       setLoadingFormations(true)
-      fetch('/api/formations')
-        .then((r) => r.json())
+      fetchJson('/api/formations')
         .then((d) => setFormationsList(d.formations || []))
+        .catch((e) => setError(loadError(e, 'la liste des formations')))
         .finally(() => setLoadingFormations(false))
     }
-  }, [step, formations.length])
+  }, [step, formations.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load sessions when formation selected
   useEffect(() => {
@@ -248,24 +324,73 @@ export default function AgentMail() {
     setLoadingSessions(true)
     setSessionsList([])
     setSelectedSessions([])
-    fetch(`/api/sessions?formationId=${formation.id}&format=${encodeURIComponent(formation.format)}`)
-      .then((r) => r.json())
+    fetchJson(`/api/sessions?formationId=${formation.id}&format=${encodeURIComponent(formation.format)}`)
       .then((d) => setSessionsList(d.sessions || []))
+      .catch((e) => setError(loadError(e, 'les sessions')))
       .finally(() => setLoadingSessions(false))
   }, [formation])
 
-  // Contact search debounce
+  // Recherche de contact progressive : la première passe HubSpot s'affiche dès qu'elle arrive,
+  // les passes complémentaires sont AJOUTÉES à la suite (aucun réordonnancement, la liste ne saute
+  // pas, la sélection n'est pas touchée). Une réponse d'une recherche plus ancienne est ignorée.
+  const searchIdRef = useRef(0)
   useEffect(() => {
+    setContactSearchFailed(false)
     if (contactSearch.length < 2) { setContactResults([]); return }
     const t = setTimeout(() => {
+      const id = ++searchIdRef.current
+      const search = (part: 'first' | 'rest') => fetchJson('/api/contact-search', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ q: contactSearch, part }),
+      })
       setContactSearching(true)
-      fetch(`/api/contact-search?q=${encodeURIComponent(contactSearch)}`)
-        .then((r) => r.json())
-        .then((d) => setContactResults(d.contacts || []))
-        .finally(() => setContactSearching(false))
+      setContactResults([])
+      let firstDone = false
+      let firstFailed = false
+      let pendingRest: HSContact[] | null = null
+      const append = (list: HSContact[]) =>
+        setContactResults((prev) => [...prev, ...list.filter((c) => !prev.some((p) => p.id === c.id))])
+      const first = search('first')
+        .then((d) => {
+          if (id !== searchIdRef.current) return
+          firstDone = true
+          append(d.contacts || [])
+          if (pendingRest) append(pendingRest)
+        })
+        .catch(() => { firstDone = true; firstFailed = true; if (pendingRest && id === searchIdRef.current) append(pendingRest) })
+      const rest = search('rest')
+        .then((d) => {
+          if (id !== searchIdRef.current) return
+          if (firstDone) append(d.contacts || [])
+          else pendingRest = d.contacts || []
+        })
+        .then(() => false, () => true)
+      Promise.all([first, rest]).then(([, restFailed]) => {
+        if (id !== searchIdRef.current) return
+        if (firstFailed && restFailed) setContactSearchFailed(true)
+        setContactSearching(false)
+      })
     }, 350)
     return () => clearTimeout(t)
   }, [contactSearch])
+
+  // « Déjà contacté » : envois au même contact sur les 14 derniers jours, dès qu'il est choisi
+  useEffect(() => {
+    if (!psContact) { setHistory(null); return }
+    let alive = true
+    const contactId = psContact.id
+    // POST : l'email du PS ne passe jamais dans l'adresse de la requête
+    fetchJson('/api/contact-history', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contactId, email: psContact.email || '', rpps: psContact.rpps || '' }),
+    })
+      .then((d) => { if (alive) setHistory({ contactId, jours: d.jours || 14, envois: d.envois || [], failed: false }) })
+      .catch(() => { if (alive) setHistory({ contactId, jours: 14, envois: [], failed: true }) })
+    return () => { alive = false }
+  }, [psContact])
+
+  // Aperçu fidèle : même fonction de rendu que l'envoi ; avertissements une fois la rédaction finie
+  const previewHtml = useMemo(() => renderMail(mailCorps).html, [mailCorps])
+  const warnings = useMemo(() => (generating ? [] : linkWarnings(mailCorps)), [mailCorps, generating])
 
   const toggleSession = (s: Session) => {
     setSelectedSessions((prev) =>
@@ -273,16 +398,29 @@ export default function AgentMail() {
     )
   }
 
+  // Rédaction affichée au fil de l'eau : l'étape 5 s'ouvre dès que le serveur commence à répondre,
+  // l'objet puis le texte s'y écrivent progressivement (réponse NDJSON de /api/generate).
   const handleGenerate = async () => {
     if (!commercial || !formation || !selectedSessions.length || !psContact) return
+    genAbortRef.current?.abort()
+    const ctrl = new AbortController()
+    genAbortRef.current = ctrl
     setLoading(true)
+    setGenerating(true)
     setError('')
+    setMailSujet('')
+    setMailCorps('')
+    setView('texte')
+    let onStep5 = false
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      let res: Response
+      try {
+        res = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctrl.signal,
         body: JSON.stringify({
-          commercial: { name: commercial.name, email: commercial.email, phone: commercial.phone || '' },
+          commercial_id: commercial.id,
           formation: { id: formation.id, nom: formation.nom, numero: formation.numero, format: formation.format, public: formation.public },
           sessions: selectedSessions.map((s) => ({
             numero: s.numero,
@@ -300,34 +438,88 @@ export default function AgentMail() {
             rpps: psContact.rpps || '',
           },
         }),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
-      setMailSujet(data.sujet)
-      setMailCorps(data.corps)
+        })
+      } catch {
+        if (ctrl.signal.aborted) return
+        throw new Error('Connexion impossible. Vérifie ta connexion internet puis réessaie.')
+      }
+      if (res.redirected && new URL(res.url).pathname === '/login') throw new Error(SESSION_EXPIRED)
+      if (!res.ok || !res.body || !(res.headers.get('content-type') || '').includes('ndjson')) {
+        const data = await res.json().catch(() => null)
+        throw new Error(data?.error || 'Une erreur est survenue. Réessaie dans quelques instants.')
+      }
       setStep(5)
+      onStep5 = true
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let raw = ''
+      let finished = false
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let nl: number
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl).trim()
+          buffer = buffer.slice(nl + 1)
+          if (!line) continue
+          const event = JSON.parse(line)
+          if (event.t === 'delta') {
+            raw += event.d
+            const parsed = parseGeneratedMail(raw)
+            setMailSujet(parsed.sujet)
+            setMailCorps(parsed.corps)
+          } else if (event.t === 'done') {
+            setMailSujet(event.sujet)
+            setMailCorps(event.corps)
+            finished = true
+          } else if (event.t === 'error') {
+            throw new Error(event.error)
+          }
+        }
+      }
+      if (!finished) throw new Error('La rédaction du mail a été interrompue. Réessaie.')
+      setIdempotencyKey(crypto.randomUUID())
     } catch (e: any) {
+      if (ctrl.signal.aborted) return
       setError(e.message)
+      setMailSujet('')
+      setMailCorps('')
+      if (onStep5) setStep(4)
     } finally {
-      setLoading(false)
+      if (genAbortRef.current === ctrl) {
+        genAbortRef.current = null
+        setLoading(false)
+        setGenerating(false)
+      }
     }
+  }
+
+  // « Retour » pendant la rédaction : la requête est annulée (le serveur arrête Claude)
+  const cancelGenerate = () => {
+    genAbortRef.current?.abort()
+    genAbortRef.current = null
+    setLoading(false)
+    setGenerating(false)
+    setMailSujet('')
+    setMailCorps('')
+    setStep(4)
   }
 
   const handleSend = async () => {
     if (!commercial || !psContact || !mailSujet || !mailCorps) return
+    // Verrou synchrone : `loading` (state) n'est appliqué qu'au re-render suivant
+    if (sendingRef.current) return
+    sendingRef.current = true
     setLoading(true)
     setError('')
     try {
-      const res = await fetch('/api/send', {
+      const data = await fetchJson('/api/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          commercial: {
-            name: commercial.name,
-            email: commercial.email,
-            hubspot_id: commercial.hubspot_id,
-            slack_user_id: commercial.slack_user_id,
-          },
+          commercial_id: commercial.id,
           ps: {
             id: psContact.id,
             titre: psTitre,
@@ -339,22 +531,23 @@ export default function AgentMail() {
           formation: { nom: formation!.nom, numero: formation!.numero },
           sujet: mailSujet,
           corps: mailCorps,
+          idempotencyKey,
         }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
       setSendResult(data)
       setStep(6)
     } catch (e: any) {
       setError(e.message)
     } finally {
+      sendingRef.current = false
       setLoading(false)
     }
   }
 
   const reset = () => {
+    genAbortRef.current?.abort()
     setStep(1)
-    setCommercial(null)
+    setCommercial(me?.commercial ?? null)
     setFormation(null)
     setSelectedSessions([])
     setPsContact(null)
@@ -362,6 +555,7 @@ export default function AgentMail() {
     setContactResults([])
     setMailSujet('')
     setMailCorps('')
+    setIdempotencyKey('')
     setSendResult(null)
     setError('')
   }
@@ -378,7 +572,7 @@ export default function AgentMail() {
     2: !!formation,
     3: selectedSessions.length > 0,
     4: !!psContact,
-    5: !!mailSujet && !!mailCorps,
+    5: !!mailSujet && !!mailCorps && !generating,
   }
 
   return (
@@ -386,14 +580,25 @@ export default function AgentMail() {
       <div className="w-full max-w-xl">
         {/* Header */}
         <div className="mb-6">
-          <div className="flex items-center gap-2 mb-1">
-            <div className="w-6 h-6 flex items-center justify-center">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <rect x="2" y="3" width="8" height="18" rx="4" fill="#111111"/>
-                <rect x="14" y="3" width="8" height="18" rx="4" fill="#111111"/>
-              </svg>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 flex items-center justify-center">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <rect x="2" y="3" width="8" height="18" rx="4" fill="#111111"/>
+                  <rect x="14" y="3" width="8" height="18" rx="4" fill="#111111"/>
+                </svg>
+              </div>
+              <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Médéré</span>
             </div>
-            <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">Médéré</span>
+            <form action="/api/auth/logout" method="post">
+              <button
+                type="submit"
+                className="flex items-center gap-1.5 px-3 py-2 border border-zinc-200 text-xs font-medium text-zinc-600 rounded-lg hover:bg-white transition-colors"
+              >
+                <Icons.Logout />
+                Se déconnecter
+              </button>
+            </form>
           </div>
           <h1 className="text-xl font-semibold text-zinc-900">Agent Mail DPC</h1>
           <p className="text-sm text-zinc-500 mt-0.5">Génère et envoie un mail personnalisé en moins de 60 secondes</p>
@@ -402,11 +607,31 @@ export default function AgentMail() {
 
         {/* Card */}
         <div className="bg-white border border-zinc-200 rounded-xl shadow-sm p-6">
+          {blocked ? (
+            <div className="flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-zinc-700">
+              <Icons.Warning />
+              <span>{blocked}</span>
+            </div>
+          ) : !me ? (
+            <div className="flex items-center gap-2 py-6 justify-center text-sm text-zinc-400">
+              <Icons.Loader /> Chargement...
+            </div>
+          ) : me.role === 'lecteur' ? (
+            <div className="space-y-3">
+              <div className="flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-200 rounded-lg text-sm text-zinc-700">
+                <Icons.User />
+                <span>Ton compte n'est pas associé à une fiche commercial : tu peux consulter le suivi, mais pas générer ni envoyer de mail.</span>
+              </div>
+              <a href="/suivi" className="block w-full py-2.5 text-center bg-zinc-900 text-white text-sm font-medium rounded-lg hover:bg-zinc-800 transition-colors">
+                Voir le suivi des envois
+              </a>
+            </div>
+          ) : (<>
           {step < 6 && <StepIndicator current={step} />}
 
           {/* Error */}
           {error && (
-            <div className="mb-4 flex items-start gap-2 p-3 bg-red-50 border border-red-100 rounded-lg text-sm text-red-700">
+            <div className="mb-4 flex items-start gap-2 p-3 bg-zinc-50 border border-zinc-400 rounded-lg text-sm text-zinc-900">
               <Icons.Warning />
               <span>{error}</span>
             </div>
@@ -417,14 +642,25 @@ export default function AgentMail() {
             <div className="space-y-4">
               <div>
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Qui envoie ce mail ?</h2>
-                <p className="text-sm text-zinc-500">Sélectionne ton nom pour personnaliser la signature.</p>
+                <p className="text-sm text-zinc-500">
+                  {me.role === 'admin'
+                    ? "Tu peux envoyer au nom de n'importe quel commercial actif : ce sera indiqué dans la Note HubSpot."
+                    : 'Le mail part à ton nom, avec ta signature.'}
+                </p>
               </div>
-              <Select
-                options={commerciaux.map((c) => ({ label: c.name, ...c }))}
-                value={commercial ? { label: commercial.name, ...commercial } : null}
-                onChange={(v) => setCommercial(v as any)}
-                placeholder="Sélectionner un commercial..."
-              />
+              {me.role === 'admin' ? (
+                <Select
+                  options={commerciaux.map((c) => ({ label: c.name, ...c }))}
+                  value={commercial ? { label: commercial.name, ...commercial } : null}
+                  onChange={(v) => setCommercial({ id: v.id, name: v.name, email: v.email })}
+                  placeholder="Sélectionner un commercial..."
+                />
+              ) : (
+                <div className="w-full flex items-center justify-between px-3.5 py-2.5 bg-zinc-50 border border-zinc-200 rounded-lg text-sm">
+                  <span className="text-zinc-900">{commercial?.name}</span>
+                  <span className="flex items-center gap-1 text-xs text-zinc-400"><Icons.User /> Ton compte</span>
+                </div>
+              )}
               <button
                 onClick={() => setStep(2)}
                 disabled={!canProceed[1]}
@@ -591,8 +827,15 @@ export default function AgentMail() {
                 </div>
               )}
 
-              {contactSearch.length >= 2 && !contactSearching && contactResults.length === 0 && !psContact && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg flex items-start gap-2 text-sm text-amber-700">
+              {contactSearchFailed && !contactSearching && !psContact && (
+                <div className="p-3 bg-zinc-50 border border-zinc-400 rounded-lg flex items-start gap-2 text-sm text-zinc-900">
+                  <Icons.Warning />
+                  <span>HubSpot indisponible, ne crée pas le contact. Réessaie dans quelques instants.</span>
+                </div>
+              )}
+
+              {contactSearch.length >= 2 && !contactSearching && !contactSearchFailed && contactResults.length === 0 && !psContact && (
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg flex items-start gap-2 text-sm text-zinc-700">
                   <Icons.Warning />
                   <span>Aucun contact trouvé dans HubSpot. Vérifie l'orthographe ou crée le contact dans HubSpot d'abord.</span>
                 </div>
@@ -636,6 +879,27 @@ export default function AgentMail() {
                 </div>
               )}
 
+              {psContact && history?.contactId === psContact.id && history.envois.length > 0 && (
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-sm text-zinc-700" data-alerte="deja-contacte">
+                  <div className="flex items-start gap-2 font-medium">
+                    <Icons.Warning />
+                    <span>Déjà contacté ces {history.jours} derniers jours</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 space-y-1 text-xs">
+                    {history.envois.map((h, i) => (
+                      <li key={i}>
+                        {h.relance ? 'Relance' : 'Mail'} de <strong>{h.commercial}</strong> le {formatDateTime(h.envoyeLe)}
+                        {h.formation ? <> · formation « {h.formation} »</> : null} · <strong>{h.statut}</strong>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {psContact && history?.contactId === psContact.id && history.failed && (
+                <p className="text-xs text-zinc-500">Impossible de vérifier les envois récents à ce contact. Consulte le suivi avant d'envoyer.</p>
+              )}
+
               <div className="flex gap-2">
                 <button onClick={() => setStep(3)} className="px-4 py-2.5 border border-zinc-200 text-sm font-medium rounded-lg hover:bg-zinc-50 transition-colors">
                   Retour
@@ -656,7 +920,9 @@ export default function AgentMail() {
             <div className="space-y-4">
               <div>
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Aperçu du mail</h2>
-                <p className="text-sm text-zinc-500">Vérifie et modifie si nécessaire avant d'envoyer.</p>
+                <p className="text-sm text-zinc-500">
+                  {generating ? 'Rédaction du mail en cours…' : 'Vérifie et modifie si nécessaire avant d\'envoyer.'}
+                </p>
               </div>
 
               <div className="space-y-2.5">
@@ -666,27 +932,80 @@ export default function AgentMail() {
                     type="text"
                     value={mailSujet}
                     onChange={(e) => setMailSujet(e.target.value)}
-                    className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-900/10"
+                    readOnly={generating}
+                    placeholder={generating ? 'Rédaction en cours…' : ''}
+                    className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zinc-900/10 read-only:bg-zinc-50"
                   />
                 </div>
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-medium text-zinc-500">Corps du mail</label>
-                    <span className="text-[10px] text-zinc-400">{mailCorps.length} caractères</span>
+                    <div className="flex gap-1" role="tablist">
+                      {([['texte', 'Texte'], ['apercu', 'Aperçu']] as const).map(([v, label]) => (
+                        <button
+                          key={v}
+                          type="button"
+                          role="tab"
+                          aria-selected={view === v}
+                          onClick={() => setView(v)}
+                          className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                            view === v ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-200 text-zinc-600 hover:border-zinc-300'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+                      {generating && <Icons.Loader />}
+                      {generating ? 'Rédaction en cours' : `${mailCorps.length} caractères`}
+                    </span>
                   </div>
-                  <textarea
+
+                  {view === 'texte' ? (
+                    <textarea
                       value={mailCorps}
                       onChange={(e) => setMailCorps(e.target.value)}
+                      readOnly={generating}
                       rows={14}
-                      className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y"
+                      data-zone="texte"
+                      className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y read-only:bg-zinc-50"
                     />
-
-                    {/* Affichage du corps du mail avec rendu HTML (à décommenter en fonction des retours des commerciaux) */}
-                    {/* <div className="mt-2 p-3.5 border border-zinc-100 rounded-lg bg-zinc-50 text-sm text-zinc-700 leading-relaxed"
-                      dangerouslySetInnerHTML={{ __html: mailCorps.replace(/\n/g, '<br>') }}
-                    /> */}
+                  ) : (
+                    <div className="border border-zinc-200 rounded-lg overflow-hidden bg-white" data-zone="apercu">
+                      <div className="px-3.5 py-2.5 bg-zinc-50 border-b border-zinc-200 text-xs text-zinc-600 space-y-0.5">
+                        <div><span className="text-zinc-400">De :</span> {commercial?.name} – Médéré</div>
+                        <div><span className="text-zinc-400">À :</span> {psContact?.email}</div>
+                        <div><span className="text-zinc-400">Objet :</span> <span className="font-medium text-zinc-900">{mailSujet}</span></div>
+                      </div>
+                      {/* Même HTML que le mail envoyé (renderMail), avec l'apparence par défaut d'une messagerie.
+                          Un clic sur un lien l'ouvre dans un nouvel onglet, sans quitter l'agent. */}
+                      <div
+                        className="px-4 py-3.5 max-h-[28rem] overflow-y-auto break-words [&_a]:text-zinc-900 [&_a]:underline"
+                        style={{ fontFamily: 'Arial, Helvetica, sans-serif', fontSize: '14px', lineHeight: 1.5, color: '#27272a' }}
+                        onClick={(e) => {
+                          const a = (e.target as HTMLElement).closest('a')
+                          if (a) { e.preventDefault(); window.open(a.href, '_blank', 'noopener,noreferrer') }
+                        }}
+                        dangerouslySetInnerHTML={{ __html: previewHtml }}
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {warnings.length > 0 && (
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-sm text-zinc-700" data-alerte="liens">
+                  <div className="flex items-start gap-2 font-medium">
+                    <Icons.Warning />
+                    <span>{warnings.length === 1 ? 'Un lien à vérifier' : `${warnings.length} liens à vérifier`} avant l'envoi</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 space-y-1 text-xs">
+                    {warnings.map((w, i) => (
+                      <li key={i}><span className="font-mono bg-white/60 px-1 rounded">{w.extrait}</span> : {w.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               <div className="p-3 bg-zinc-50 border border-zinc-200 rounded-lg flex items-center gap-2.5 text-xs text-zinc-600">
                 <Icons.Mail />
@@ -694,7 +1013,7 @@ export default function AgentMail() {
               </div>
 
               <div className="flex gap-2">
-                <button onClick={() => setStep(4)} className="px-4 py-2.5 border border-zinc-200 text-sm font-medium rounded-lg hover:bg-zinc-50 transition-colors">
+                <button onClick={generating ? cancelGenerate : () => setStep(4)} className="px-4 py-2.5 border border-zinc-200 text-sm font-medium rounded-lg hover:bg-zinc-50 transition-colors">
                   Retour
                 </button>
                 <button
@@ -702,7 +1021,7 @@ export default function AgentMail() {
                   disabled={!canProceed[5] || loading}
                   className="flex-1 py-2.5 bg-zinc-900 text-white text-sm font-medium rounded-lg hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
                 >
-                  {loading ? <><Icons.Loader /> Envoi en cours...</> : <><Icons.Send /> Envoyer le mail</>}
+                  {generating ? <><Icons.Loader /> Rédaction en cours...</> : loading ? <><Icons.Loader /> Envoi en cours...</> : <><Icons.Send /> Envoyer le mail</>}
                 </button>
               </div>
             </div>
@@ -712,7 +1031,7 @@ export default function AgentMail() {
           {step === 6 && sendResult && (
             <div className="space-y-5 py-2">
               <div className="flex flex-col items-center text-center gap-3 py-4">
-                <div className="text-green-600">
+                <div className="text-zinc-900">
                   <Icons.CircleCheck />
                 </div>
                 <div>
@@ -733,28 +1052,22 @@ export default function AgentMail() {
                 />
                 <StatusRow
                   icon={<Icons.Mail />}
-                  label="Activité HubSpot"
+                  label="Fiche HubSpot du PS"
                   ok={sendResult.hubspot_logged}
-                  disabled={sendResult.hubspot_disabled}
-                  detail={sendResult.hubspot_disabled ? 'Scope crm.objects.contacts.write requis' : sendResult.hubspot_logged ? 'Loggé sur les "Notes" du commercial' : 'Erreur'}
+                  detail={sendResult.hubspot_logged ? 'Note ajoutée sur la fiche du PS' : 'Note non ajoutée (le mail est bien parti)'}
                 />
                 <StatusRow
                   icon={<Icons.Calendar />}
-                  label="Relance J+3 programmée"
+                  label="Rappel de relance programmé"
                   ok={sendResult.relance_stored}
-                  detail={sendResult.relance_stored ? `Le ${formatDateShort(sendResult.relance_date)}` : 'Vercel KV non configuré'}
+                  detail={sendResult.relance_stored ? `Le ${formatDateShort(sendResult.relance_date)}` : 'Rappel non programmé'}
                 />
               </div>
 
               {/* Pending actions */}
-              {(sendResult.hubspot_disabled || !sendResult.relance_stored) && (
-                <div className="p-3 bg-amber-50 border border-amber-100 rounded-lg text-xs text-amber-700 space-y-1">
-                  {sendResult.hubspot_disabled && (
-                    <p>⚠️ <strong>HubSpot log :</strong> Ajoute le scope <code>crm.objects.contacts.write</code> à ta private app + active <code>HS_WRITE_SCOPE_ENABLED=true</code> dans les env vars.</p>
-                  )}
-                  {!sendResult.relance_stored && (
-                    <p>⚠️ <strong>Relance J+3 :</strong> Configure Vercel KV dans le dashboard Vercel et ajoute les env vars <code>KV_REST_API_URL</code> + <code>KV_REST_API_TOKEN</code>.</p>
-                  )}
+              {!sendResult.relance_stored && (
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-xs text-zinc-700 space-y-1">
+                  <p>Le rappel n'a pas pu être programmé : pense à relancer ce PS toi-même dans 3 jours.</p>
                 </div>
               )}
 
@@ -766,6 +1079,7 @@ export default function AgentMail() {
               </button>
             </div>
           )}
+          </>)}
         </div>
 
         {/* Footer */}
@@ -777,8 +1091,8 @@ export default function AgentMail() {
   )
 }
 
-function StatusRow({ icon, label, ok, disabled, detail }: {
-  icon: React.ReactNode; label: string; ok: boolean; disabled?: boolean; detail?: string
+function StatusRow({ icon, label, ok, detail }: {
+  icon: React.ReactNode; label: string; ok: boolean; detail?: string
 }) {
   return (
     <div className="flex items-center justify-between px-3.5 py-2.5 border-b border-zinc-100 last:border-0 bg-white">
@@ -788,10 +1102,18 @@ function StatusRow({ icon, label, ok, disabled, detail }: {
       </div>
       <div className="flex items-center gap-1.5">
         {detail && <span className="text-[11px] text-zinc-400">{detail}</span>}
-        <div className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-green-500' : disabled ? 'bg-amber-400' : 'bg-red-400'}`} />
+        <div className={`w-1.5 h-1.5 rounded-full ${ok ? 'bg-zinc-900' : 'border border-zinc-400 bg-white'}`} />
       </div>
     </div>
   )
+}
+
+function formatDateTime(iso: string) {
+  try {
+    return new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' }).format(new Date(iso))
+  } catch {
+    return ''
+  }
 }
 
 function formatDateShort(d: string) {
