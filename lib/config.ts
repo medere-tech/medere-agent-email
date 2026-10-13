@@ -39,10 +39,49 @@ export const RELANCE_DELAY_DAYS = 3
 // Fuseau de référence des compteurs journaliers et des relances.
 export const TIMEZONE = 'Europe/Paris'
 
-// Administrateurs : peuvent choisir n'importe quel commercial actif à l'étape 1, relancer
-// n'importe quel mail et tout voir. Toute action faite au nom d'un autre commercial est tracée
-// (sent_by dans le suivi, mention dans la Note HubSpot).
-export const ADMIN_EMAILS = ['dethie@medere.fr']
+// Administrateur : profil lu dans les variables d'environnement (aucun identifiant dans le code),
+// indépendant de la table Commerciaux d'Airtable. Il a toujours l'accès complet, que sa fiche existe,
+// soit « Plus actif » ou ait été supprimée. Il envoie en son nom (ce profil) ou au nom de n'importe
+// quel commercial actif ; toute action faite au nom d'un autre commercial est tracée (sent_by dans
+// le suivi, mention dans la Note HubSpot). Il relance n'importe quel mail et voit tout.
+//   ADMIN_EMAIL, ADMIN_NAME, ADMIN_HUBSPOT_OWNER_ID, ADMIN_SLACK_USER_ID : obligatoires
+//   ADMIN_PHONE : facultatif
+// Une variable obligatoire manquante : rôle administrateur désactivé (avertissement journalisé).
+export interface AdminProfile {
+  email: string
+  name: string
+  hubspot_id: string
+  slack_user_id: string
+  phone: string
+}
+
+const ADMIN_REQUIRED = ['ADMIN_EMAIL', 'ADMIN_NAME', 'ADMIN_HUBSPOT_OWNER_ID', 'ADMIN_SLACK_USER_ID'] as const
+let adminWarned = ''
+
+export function adminProfile(): AdminProfile | null {
+  const env = (name: string) => String(process.env[name] || '').trim()
+  const missing = ADMIN_REQUIRED.filter((n) => !env(n))
+  if (missing.length) {
+    const key = missing.join(',')
+    if (adminWarned !== key) {
+      adminWarned = key
+      console.warn(`[CONFIG] Rôle administrateur désactivé : variable(s) manquante(s) ${missing.join(', ')}`)
+    }
+    return null
+  }
+  return {
+    email: env('ADMIN_EMAIL').toLowerCase(),
+    name: env('ADMIN_NAME'),
+    hubspot_id: env('ADMIN_HUBSPOT_OWNER_ID'),
+    slack_user_id: env('ADMIN_SLACK_USER_ID'),
+    phone: env('ADMIN_PHONE'),
+  }
+}
+
+export function adminEmails(): string[] {
+  const p = adminProfile()
+  return p ? [p.email] : []
+}
 
 // Fiches Commerciaux : dernière version connue servie sans attente, rafraîchie en arrière-plan
 // quand elle a plus de N secondes (délai maximal de révocation : voir README « Rôles et accès »).
@@ -58,8 +97,11 @@ export const RATE_LIMITS = {
 // quand elle a plus de N secondes
 export const AIRTABLE_CACHE_SECONDS = 300
 
-// Destinataire des alertes techniques (DM Slack) : erreurs du cron, Note HubSpot en échec définitif
-export const ALERT_SLACK_USER_ID = 'U05UVHGBURX'
+// Destinataire des alertes techniques (DM Slack) : erreurs du cron, Note HubSpot en échec définitif.
+// C'est l'administrateur (ADMIN_SLACK_USER_ID) ; chaîne vide si le profil administrateur est incomplet.
+export function alertSlackUserId(): string {
+  return adminProfile()?.slack_user_id || ''
+}
 
 // Notes HubSpot en échec : nouvel essai par le cron toutes les N heures, alerte après le dernier essai
 export const HUBSPOT_RETRY_DELAY_HOURS = 6

@@ -7,7 +7,8 @@
  *   node scripts/purge-test-sends.ts --host=<hôte KV>             rapport seul (par défaut)
  *   node scripts/purge-test-sends.ts --host=<hôte KV> --apply     suppression réelle
  * Options : --backup-dir=<dossier> (défaut ./backups, où chercher l'export récent).
- * Variables lues dans .env.local (ou le fichier pointé par ENV_FILE) : KV_REST_API_URL, KV_REST_API_TOKEN
+ * Variables lues dans .env.local (ou le fichier pointé par ENV_FILE) : KV_REST_API_URL, KV_REST_API_TOKEN,
+ * TEST_HUBSPOT_CONTACT_ID et TEST_PS_EMAIL (PS de test, obligatoires : le script refuse sans elles)
  *
  * Supprimé pour chaque envoi de test : email_track, email_body, email_clicks, send_result, verrous
  * hubspot_note:*, entrées de emails_index / idx:commercial / idx:contact / relances_due, et sa
@@ -22,9 +23,8 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { KEYS, PURGE_SEND_SCRIPT } from '../lib/kv-schema.ts'
 
-// PS de test : fiche HubSpot et adresse de Déthié
-const TEST_CONTACT_IDS = ['18421683158']
-const TEST_EMAILS = ['dethie@medere.fr']
+// PS de test : contact HubSpot et adresse de test, lus dans TEST_HUBSPOT_CONTACT_ID et TEST_PS_EMAIL
+// (environnement ou .env.local) ; le script refuse de tourner sans eux (voir plus bas)
 
 type Entry = Record<string, any>
 type Cmd = (string | number)[]
@@ -56,6 +56,10 @@ function fail(message: string): never {
   console.error(message)
   process.exit(1)
 }
+
+// PS de test (variables obligatoires : aucun identifiant réel dans le code)
+function testContactIds(): string[] { return [required('TEST_HUBSPOT_CONTACT_ID').trim()] }
+function testEmails(): string[] { return [required('TEST_PS_EMAIL').trim().toLowerCase()] }
 
 function required(name: string): string {
   const v = env[name]
@@ -127,7 +131,7 @@ function parse(raw: unknown): Entry | null {
 }
 
 const isTestPs = (contactId: unknown, email: unknown) =>
-  TEST_CONTACT_IDS.includes(String(contactId || '')) || TEST_EMAILS.includes(String(email || '').trim().toLowerCase())
+  testContactIds().includes(String(contactId || '')) || testEmails().includes(String(email || '').trim().toLowerCase())
 
 async function main(): Promise<void> {
   const host = option('host')
@@ -141,7 +145,7 @@ async function main(): Promise<void> {
     console.log(`Export de sauvegarde : ${backup}`)
   }
   console.log(apply ? '=== SUPPRESSION ===\n' : '=== RAPPORT SEUL : aucune modification (ajouter --apply pour supprimer) ===\n')
-  console.log(`PS de test : contact(s) ${TEST_CONTACT_IDS.join(', ')} ; adresse(s) ${TEST_EMAILS.join(', ')}\n`)
+  console.log(`PS de test : contact(s) ${testContactIds().join(', ')} ; adresse(s) ${testEmails().join(', ')}\n`)
 
   // 1. Envois
   const trackKeys = await scan('email_track:*')

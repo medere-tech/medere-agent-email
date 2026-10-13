@@ -11,20 +11,20 @@ Il ne dépend d'aucune donnée laissée en place : les données nécessaires son
 |---|---|
 | Branche | celle à valider (jamais `main` directement) |
 | `.env.local` | complet (voir README) — **`KV_REST_API_URL` pointe sur la base Upstash de TEST** |
-| Contact HubSpot de test | un seul contact dédié (ex. `18421683158`, adresse `dethie@medere.fr`) |
+| Contact HubSpot de test | un seul contact dédié (`TEST_HUBSPOT_CONTACT_ID`, ex. `10000000001` ; adresse `TEST_PS_EMAIL`, ex. `prenom.nom@medere.fr`) |
 | Adresse de réception | uniquement l'adresse du contact de test |
 | Slack | le `slack_user_id` du testeur (les DM de relance n'arrivent qu'à lui) |
-| Fiche commercial de test | « Dethie Faye » (`recubd9fXVX2rkhfB`, `dethie@medere.fr`, owner HubSpot `176772849`, Slack `U05UVHGBURX`, Statut Actif) — la session Google `dethie@medere.fr` est **administrateur** |
+| Expéditeur de test | le profil administrateur (variables `ADMIN_*` de `.env.local` : email, nom, owner HubSpot, Slack), indépendant de la table Commerciaux — la session Google `ADMIN_EMAIL` est **administrateur** quel que soit l'état de sa fiche Airtable. Ne jamais modifier une fiche Commerciaux ni la réactiver (une fiche « Actif » déclenche les automatisations d'attribution de contacts) |
 | Node | ≥ 22.18 (exécute `scripts/seed-test.ts` sans dépendance) |
 | Navigateur | profil Chrome **« Tests Claude »** (uniquement l'extension Claude), qui apparaît sous le nom **« Browser 1 »** dans `/chrome` ; session Google @medere.fr ouverte sur `http://localhost:3000`. Les tests d'interface et les captures se font dans ce profil (dans l'autre profil, « Browser 2 », les captures échouent). Fenêtre visible à l'écran pendant les tests. |
 
-Variables à exporter pour le script de seed :
+Variables de test (dans `.env.local` ou exportées ; jamais sur Vercel). Les scripts refusent de tourner si l'une d'elles manque :
 
 ```bash
-export TEST_KV_HOST=<hôte-de-la-base-kv-de-test>   # ex. close-imp-209245.upstash.io
-export TEST_HUBSPOT_CONTACT_ID=18421683158
-export TEST_PS_EMAIL=dethie@medere.fr
-export TEST_SLACK_USER_ID=<slack-id-du-testeur>
+TEST_KV_HOST=<hôte-de-la-base-kv-de-test>   # ex. exemple-test-12345.upstash.io
+TEST_HUBSPOT_CONTACT_ID=<id-du-contact-de-test>   # ex. 10000000001
+TEST_PS_EMAIL=<adresse-du-contact-de-test>        # ex. prenom.nom@medere.fr
+TEST_SLACK_USER_ID=<slack-id-du-testeur>          # ex. U00000000AA
 ```
 
 ---
@@ -189,21 +189,21 @@ Données : `seed --relance --names --purge` (envois au PS de test au nom de « C
 | J1 | Rapport (avant migration) | 6 envois du PS de test listés par commercial, 3 anciennes relances ; 2 envois et 1 relance du PS fictif conservés ; aucune modification |
 | J2 | `--apply` avec `--backup-dir` vide | refus, exit 1 |
 | J3 | `--export` puis `--apply` | restent : les 2 envois du PS fictif, `emails_index` à 2 membres, `relance:test-autre-ps` ; migration puis `--verify` à 0 écart |
-| J4 | Après migration : ouvertures / clics sur des envois du PS de test, `--verify` (0), purge `--apply`, `--verify` | contributions décomptées, 0 écart ; compteurs du PS fictif inchangés (y compris par commercial) ; `idx:contact:18421683158` supprimé, `idx:contact:99999999999` intact |
+| J4 | Après migration : ouvertures / clics sur des envois du PS de test, `--verify` (0), purge `--apply`, `--verify` | contributions décomptées, 0 écart ; compteurs du PS fictif inchangés (y compris par commercial) ; `idx:contact:<TEST_HUBSPOT_CONTACT_ID>83158` supprimé, `idx:contact:99999999999` intact |
 
 ### K. Identité et sécurité (lot 2)
 
 | # | Étapes | Attendu |
 |---|---|---|
 | K0 | Fonctions pures de `lib/roles.ts` (rôles, expéditeur) et `buildSentNoteBody` exécutées avec Node | tous les cas conformes (admin, commercial, lecteur, inactif, identifiant forgé, fiche inactive, Note avec / sans « Envoyé par ») |
-| K1 | `GET /api/me` (session `dethie@medere.fr`) | `role: admin`, fiche `recubd9fXVX2rkhfB` |
+| K1 | `GET /api/me` (session `ADMIN_EMAIL`) | `role: admin`, fiche `admin:self` (profil des variables `ADMIN_*`) |
 | K2 | Étape 1 en administrateur | fiche Dethie Faye présélectionnée, liste des commerciaux actifs modifiable |
 | K3 | `POST /api/generate` avec `commercial_id` de Zacharie (**génération seule**) | 200, signature de Zacharie, log `[GENERATE] Génération par … au nom de …` |
 | K4 | `commercial_id` d'une fiche « Plus actif » | 400 « Ce commercial n'est pas actif… » |
 | K5 | Ancien objet `commercial: {…}` forgé, sans `commercial_id` | ignoré : signature Dethie Faye |
-| K6 | `ADMIN_EMAILS` vidé (annexe §6) : `/api/me`, étape 1, `generate` et `send` au nom de Zacharie | `role: commercial` ; étape 1 verrouillée « Ton compte » ; 403 « Tu ne peux générer et envoyer des mails qu'en ton nom. » — **remettre `ADMIN_EMAILS`** |
-| K7 | Envoi réel `[TEST-L2]` en commercial | `email_track` : nom, email, Slack `U05UVHGBURX`, owner `176772849` relus dans Airtable, pas de `sent_by` ; Note sans « Envoyé par » |
-| K8 | Fiche `recubd9fXVX2rkhfB` → « Plus actif » (connecteur Airtable : le jeton de l'app est en lecture seule), interroger `/api/me`, `/api/generate`, `/api/suivi`, `/api/send` toutes les 4 s | tout en 403 en 61 s au plus (fiches rafraîchies en arrière-plan, aucune requête ne dépasse 300 ms) ; accueil et `/suivi` affichent « Ton accès à l'Agent Mail a été désactivé… » — **remettre « Actif »**, accès rétabli en moins de 60 s |
+| K6 | `DEV_FORCE_ROLE=commercial` (annexe §6) : `/api/me`, étape 1, `generate` et `send` au nom de Zacharie | `role: commercial` ; étape 1 verrouillée « Ton compte » ; 403 « Tu ne peux générer et envoyer des mails qu'en ton nom. » — **retirer `DEV_FORCE_ROLE`** |
+| K7 | Envoi réel `[TEST-L2]` en commercial | `email_track` : nom, email, Slack `ADMIN_SLACK_USER_ID`, owner `ADMIN_HUBSPOT_OWNER_ID` relus côté serveur, pas de `sent_by` ; Note sans « Envoyé par » |
+| K8 | `DEV_FORCE_ROLE=inactif` (annexe §6 ; ne jamais modifier une fiche Airtable), interroger `/api/me`, `/api/generate`, `/api/suivi`, `/api/send` toutes les 4 s | tout en 403 en 61 s au plus (fiches rafraîchies en arrière-plan, aucune requête ne dépasse 300 ms) ; accueil et `/suivi` affichent « Ton accès à l'Agent Mail a été désactivé… » — **remettre « Actif »**, accès rétabli en moins de 60 s |
 | K9 | 31 `generate` puis 21 `send` invalides (aucun appel à Claude, aucun envoi) | 30 × 400 puis 429 « … limite de 30 générations… » ; 20 × 400 puis 429 « … limite de 20 envois… » — vider `ratelimit:*` |
 | K10 | `/api/auth/login` ×2 ; callback sans cookie, sans `state`, avec `state` différent, avec `state` identique et code faux | 307 vers Google avec `state` différent à chaque fois + cookie httpOnly `Path=/api/auth` ; `invalid_state` ×3 ; `server_error` (state accepté, code refusé) ; cookie effacé |
 | K11 | Connexion Google réelle (déconnexion puis « Se connecter avec Google ») | retour sur `/`, session créée |
@@ -217,7 +217,7 @@ Données : `seed --relances` (envois de la fiche Dethie Faye, relance J+3 due : 
 |---|---|---|
 | L0 | Tests Node de `renderMail` (19 cas) | échappement, liens Markdown et URL sans lien imbriqué, ponctuation finale exclue, parenthèses, texte brut |
 | L1 | Recherche de contact (étape 4) | première liste affichée dès la première passe, contacts supplémentaires ajoutés à la suite, ordre conservé, sélection conservée |
-| L2 | Rôle lecteur (`ADMIN_EMAILS` vidé + email de la fiche changé temporairement par le connecteur Airtable) | accueil « pas associé à une fiche commercial » ; `/suivi` lisible, « Relancer » désactivé (« Ton compte ne permet pas… ») ; generate, send, relance (préparer, rédiger, envoyer) → 403 — **tout remettre, relire la fiche, vérifier le diff** |
+| L2 | Rôle lecteur (`DEV_FORCE_ROLE=lecteur`, annexe §6) | accueil « pas associé à une fiche commercial » ; `/suivi` lisible, « Relancer » désactivé (« Ton compte ne permet pas… ») ; generate, send, relance (préparer, rédiger, envoyer) → 403 — **tout remettre, relire la fiche, vérifier le diff** |
 | L3 | `GET /api/relance?id=` sur non ouvert / ouvert / cliqué | objet « Relance : votre formation … » ; brouillon **identique** pour les 3 statuts (hors date d'envoi), introduction neutre, sessions, 7 étapes, signature ; pas de mail d'origine recopié |
 | L4 | Adresse invalide, indésirable, déjà relancé, inconnu | 409 / 409 / 409 / 404, messages lisibles |
 | L6 | Administrateur sur un mail de Zacharie (**préparation seule**) ; même mail en rôle commercial | 200 « au nom de Zacharie » ; 403 « Seul le commercial qui a envoyé ce mail… » (préparer et envoyer) |
@@ -268,7 +268,7 @@ Données : `node scripts/seed-test.ts seed-prod` — 90 envois **au format de la
 | R2 | `--export` | chiffres inchangés |
 | R3 | `purge-test-sends.ts` (rapport puis `--apply`) | uniquement les 12 envois de test et leurs `relance:*` ; total 60 j : 90 → 78 |
 | R4 | `--dry-run`, migration, `--verify` | `/suivi` **identique** avant / après migration ; 0 écart |
-| R5 | `dedupe-hubspot-notes.ts --contact=18421683158` (rapport) | aucun doublon, aucun cas ambigu |
+| R5 | `dedupe-hubspot-notes.ts --contact=$TEST_HUBSPOT_CONTACT_ID` (rapport) | aucun doublon, aucun cas ambigu |
 | R6 | `seed-prod --old-writes` (ancien code encore actif : 3 envois au format ancien + `relance:*`, 6 webhooks ouverture / clic sur des envois migrés dont une ouverture sur un envoi cliqué) | `--verify` signale les envois modifiés ; compteurs en retard sur la liste (attendu dans cette fenêtre) |
 | R7 | Export, `--dry-run`, seconde migration, `--verify` | « 3 à migrer, 6 à rattraper », 0 écart ; statut « cliqué » rétabli, verrou de Note posé ; équipe = liste sur toutes les périodes ; compteurs identiques au calcul de secours (marqueur de migration retiré un instant) |
 | R8 | Bout en bout, dans l'ordre réel | déconnexion / connexion Google, étapes 1 à 6, envoi `[TEST-L6-A]`, ouverture, clic, DM premier clic, `/suivi` filtres et période, export, relance par mail `[TEST-L6-B]`, cron (5 DM dont rattrapage, rien au 2ᵉ passage), révocation (403 en 60 s, retour 200 en 32 s), déconnexion (API redirigées vers `/login`) |
@@ -281,7 +281,7 @@ Données : `node scripts/seed-test.ts seed-suivi` (60 envois sur ~48 jours, 3 co
 |---|---|---|
 | Q1 | 11 combinaisons : 30 j équipe, « Mes envois », un commercial, statut Cliqué, une formation, recherche « helene » et « LEFÈVRE », commercial + statut, 7 j, mois dernier, 60 j | total, ouverts, cliqués et premier envoi identiques au calcul indépendant ; pagination (page 3) dans l'ordre ; facettes formations = total de la période ; `GET /api/suivi` → 405 |
 | Q2 | Indicateurs | « Équipe » et « Mes envois » (compteurs journaliers) égaux aux valeurs calculées sur les entrées |
-| Q3 | Rôles | administrateur : « Mes envois » désactivé par défaut ; commercial (`ADMIN_EMAILS` vidé temporairement) : activé, filtre commercial grisé |
+| Q3 | Rôles | administrateur : « Mes envois » désactivé par défaut ; commercial (`DEV_FORCE_ROLE=commercial`) : activé, filtre commercial grisé |
 | Q4 | `TRACKING_RELIABLE_SINCE` fixé temporairement au 20/09/2026 | avertissement sur 30 j et mois dernier, absent sur 7 j ; `null` : jamais |
 | Q5 | Export CSV de la vue | BOM, `text/csv`, 13 colonnes, autant de lignes que de mails dans la vue |
 | Q6 | Onglet caché plus de 60 s, puis de nouveau visible | aucune requête pendant qu'il est caché ; une requête immédiate au retour |
@@ -307,7 +307,7 @@ Données : `seed --relances`, puis les 3 envois `test-rel-non-ouvert` / `-ouvert
 | O3 | Relance d'un mail dont le corps d'origine contient l'ancien parcours en 6 étapes : brouillon (`GET /api/relance`) et rédaction (`POST /api/relance/generate`) | les 7 étapes à jour + conseil ; aucune trace de l'ancien parcours (le mail d'origine n'est plus recopié) |
 | O4 | `grep` des identifiants de modèle dans `app`, `lib`, `components` | uniquement `REDACTION_MODEL` dans `lib/config.ts` |
 | O5 | `GET /api/contact-search` et `GET /api/contact-history` | 405 ; en POST, résultats normaux ; aucune adresse `/api/…` contenant un email pendant le parcours |
-| O6 | Révocation : fiche `recubd9fXVX2rkhfB` → « Plus actif » puis « Actif » (connecteur Airtable), `/api/me` toutes les 2 s | 403 puis 200 dans le délai documenté (README, « Délai maximal de révocation ») ; aucune requête au-delà de 300 ms ; fiche relue « Actif » |
+| O6 | Révocation (mesure historique du 8 octobre 2026, à ne plus refaire sur une vraie fiche) : fiche de test → « Plus actif » puis « Actif », `/api/me` toutes les 2 s | 403 puis 200 dans le délai documenté (README, « Délai maximal de révocation ») ; aucune requête au-delà de 300 ms ; fiche relue « Actif » |
 
 ### N. Instantané (données Airtable jamais attendues)
 
@@ -350,4 +350,4 @@ Puis, pour les envois réels faits pendant les tests :
 
 ## 6. Annexe — tester le rôle « commercial »
 
-La session `dethie@medere.fr` est administrateur. Pour tester le rôle « commercial » (étape 1 verrouillée, refus d'agir au nom d'un autre), vider **temporairement** `ADMIN_EMAILS` dans `lib/config.ts` (`npm run dev` recharge à chaud), puis le remettre et vérifier `git diff lib/config.ts`. Pour un envoi au nom d'un autre commercial, utiliser un PS **sans adresse** : si le contrôle d'identité laissait passer, la requête s'arrêterait sur l'adresse manquante (400) sans rien envoyer.
+La session `ADMIN_EMAIL` est administrateur. Pour tester un autre rôle **sans toucher à Airtable**, ajouter dans `.env.local` `DEV_FORCE_ROLE=commercial` (étape 1 verrouillée, refus d'agir au nom d'un autre ; fiche fictive `dev:commercial` construite à partir du profil administrateur), `DEV_FORCE_ROLE=lecteur` ou `DEV_FORCE_ROLE=inactif` (écran « Ton accès à l'Agent Mail a été désactivé »), redémarrer `npm run dev`, puis retirer la variable et vérifier l'empreinte de `.env.local`. Ne fonctionne qu'en développement local (`npm run dev`, `VERCEL` absent) : avec `npm run build && npm run start`, la variable est ignorée et `[IDENTITE] DEV_FORCE_ROLE présent hors développement local` est journalisé. Pour un envoi au nom d'un autre commercial, utiliser un PS **sans adresse** : si le contrôle d'identité laissait passer, la requête s'arrêterait sur l'adresse manquante (400) sans rien envoyer.

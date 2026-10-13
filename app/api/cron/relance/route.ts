@@ -14,7 +14,7 @@ export const dynamic = 'force-dynamic'
 //   1. relances J+3 par DM Slack (relances_due, rattrapage des jours manqués)
 //   2. purge RGPD
 //   3. nouveaux essais des Notes HubSpot en échec
-//   4. alerte en DM (ALERT_SLACK_USER_ID) s'il y a eu des erreurs
+//   4. alerte en DM à l'administrateur (ADMIN_SLACK_USER_ID) s'il y a eu des erreurs
 export async function GET(req: NextRequest) {
   // Sans CRON_SECRET, la valeur attendue deviendrait "Bearer undefined" :
   // n'importe qui pourrait déclencher le cron.

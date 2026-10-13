@@ -84,7 +84,7 @@ node scripts/migrate-kv.ts --host=$H --export
 ```powershell
 node scripts/purge-test-sends.ts --host=$H            # rapport
 ```
-**Attendu** : la liste des envois dont le PS est ta fiche de test (contact `18421683158` ou `dethie@medere.fr`), au nom de différents commerciaux, et « N envoi(s) vers d'autres PS (conservés) ». **Vérifie qu'il n'y a que des essais.** Puis :
+**Attendu** : la liste des envois dont le PS est le PS de test (contact `TEST_HUBSPOT_CONTACT_ID` ou adresse `TEST_PS_EMAIL`), au nom de différents commerciaux, et « N envoi(s) vers d'autres PS (conservés) ». **Vérifie qu'il n'y a que des essais.** Puis :
 ```powershell
 node scripts/purge-test-sends.ts --host=$H --apply
 ```
@@ -159,12 +159,12 @@ node scripts/dedupe-hubspot-notes.ts --host=$H --apply
 
 ## 4. Tests de fumée en production (avec ta fiche uniquement)
 
-À faire juste après l'étape 6 (ou 7), avec ta fiche « Dethie Faye » et ton contact de test :
+À faire juste après l'étape 6 (ou 7), avec ton profil administrateur et ton contact de test :
 
 | # | Action | Résultat attendu |
 |---|---|---|
 | 1 | Se connecter avec ton compte Google | l'assistant s'affiche, ton nom présélectionné |
-| 2 | Étapes 1 à 5 : une formation, ton contact `dethie@medere.fr` | « déjà contacté » s'il y a eu un envoi récent ; à l'étape 5, le texte s'écrit au fil de l'eau, 7 étapes avec le code SMS |
+| 2 | Étapes 1 à 5 : une formation, ton contact de test (`TEST_PS_EMAIL`) | « déjà contacté » s'il y a eu un envoi récent ; à l'étape 5, le texte s'écrit au fil de l'eau, 7 étapes avec le code SMS |
 | 3 | Objet préfixé `[TEST-PROD]`, « Envoyer le mail » | étape 6 : mail envoyé, Note HubSpot, relance programmée |
 | 4 | `/suivi`, période « Aujourd'hui », « Mes envois » | le mail apparaît (Envoyé puis Reçu en quelques secondes) ; indicateurs non nuls sur « 30 jours » |
 | 5 | Ouvrir le mail dans ta boîte, cliquer sur le lien agencedpc.fr | `/suivi` : Ouvert puis Cliqué (actualiser) ; DM Slack « vient de cliquer dans ton mail » |
@@ -210,3 +210,60 @@ Après un retour arrière, préviens-moi avec le message d'erreur ou la sortie d
 - **Resend → Webhooks → Deliveries** : les envois au webhook répondent 200. Des 401 indiqueraient un `RESEND_WEBHOOK_SECRET` différent de celui de Resend.
 - **`/suivi`** : les taux d'ouverture des nouveaux envois sont plus bas qu'avant (la copie commerciale n'est plus comptée) : c'est attendu.
 - **Une semaine après** : relancer `node scripts/migrate-kv.ts --host=$H --verify` (doit rester à 0 écart).
+
+---
+
+## 7. Chantier « fix/admin-et-dates » (octobre 2026)
+
+Ce que change ce chantier :
+- **Administrateur indépendant d'Airtable** : son profil (email, nom, owner HubSpot, Slack, téléphone) est lu dans les variables `ADMIN_*` de Vercel. Il garde l'accès complet même si sa fiche Commerciaux est « Plus actif » ou supprimée, envoie en son nom (« Prénom Nom (moi) » à l'étape 1) ou au nom d'un commercial actif (tracé). Les alertes techniques partent vers `ADMIN_SLACK_USER_ID`.
+- **Fiche « Plus actif »** : inchangé, la personne reste bloquée partout (sauf l'administrateur).
+- **Jours de la semaine** : les dates des sessions sont calculées dans le code (Europe/Paris) et recopiées telles quelles par Claude ; contrôle automatique après rédaction (avertissement à l'étape 5 et dans la fenêtre de relance).
+- **Notes HubSpot en double** : `dedupe-hubspot-notes.ts` sauvegarde chaque Note avant de l'archiver et sait la restaurer (`--restore`).
+
+### 7.1 Migration de données : aucune
+- Aucune clé KV à transformer, aucun script à lancer, rien à modifier dans Airtable.
+- Les anciens envois et leur suivi sont lus tels quels.
+- Les brouillons de relance déjà rédigés par Claude (format `v: 2`) sont ignorés et rédigés de nouveau à la prochaine ouverture de la fenêtre de relance (un appel à Claude par mail concerné), pour que leurs dates suivent les nouveaux libellés.
+
+### 7.2 Avant la mise en ligne : variables Vercel
+Vercel → projet → **Settings → Environment Variables**, environnement **Production** (et **Preview** si tu testes sur une préversion) :
+
+| Variable | Valeur |
+|---|---|
+| `ADMIN_EMAIL` | ton email Google @medere.fr |
+| `ADMIN_NAME` | ton nom tel qu'il doit apparaître en signature |
+| `ADMIN_HUBSPOT_OWNER_ID` | ton owner HubSpot |
+| `ADMIN_SLACK_USER_ID` | ton identifiant Slack (DM de relance de tes envois et alertes techniques) |
+| `ADMIN_PHONE` | facultatif : téléphone de ta signature |
+
+Les valeurs sont celles du bloc « Profil administrateur » de ton `.env.local`.
+**À créer avant le déploiement** : sans elles, le rôle administrateur est désactivé (journal `[CONFIG] Rôle administrateur désactivé`), ton accès reste bloqué par ta fiche « Plus actif » et les alertes techniques ne partent plus.
+**Ne jamais créer sur Vercel** : `DEV_FORCE_ROLE` (ignorée en production, avec une erreur dans les journaux) ni les `TEST_*` (scripts locaux).
+
+### 7.3 Mise en ligne
+1. Fusionner la branche dans `main` (Vercel déploie automatiquement), puis attendre « Ready ».
+2. Vercel → **Logs** : aucune ligne `[CONFIG] Rôle administrateur désactivé` ni `[IDENTITE] DEV_FORCE_ROLE présent hors développement local`.
+
+### 7.4 Tests de fumée (ton contact de test uniquement)
+| # | Action | Attendu |
+|---|---|---|
+| 1 | Ouvrir l'app | Étape 1 : « Prénom Nom (moi) » présélectionné, puis les commerciaux actifs |
+| 2 | Formation « L'IA en santé pour les médecins (Classe virtuelle) », une session, ton contact de test, « Générer le mail » | Ligne de session du type « Session 26.0xx : mardi … et jeudi … 2026, en soirée à partir de 19h00 », jours exacts ; aucun avertissement « dates incohérentes » |
+| 3 | Dans le texte, remplacer un jour par un faux (« lundi » au lieu de « mardi ») | Avertissement « Une date incohérente … est un mardi, pas un lundi » ; il disparaît après correction. Ne pas envoyer ce texte |
+| 4 | Envoyer un mail `[TEST-…]` à ton contact de test, en ton nom | Étape 6 OK ; `/suivi` : envoyé par toi, sans « par … » ; Note HubSpot sur ton contact |
+| 5 | `/suivi` → « Relancer » sur ce mail → « Rédiger la relance » | Relance au nom de ton profil, sessions avec les mêmes libellés, aucun avertissement de dates |
+
+Ensuite, archiver les Notes `[TEST-…]` créées sur ton contact de test.
+
+### 7.5 Notes HubSpot en double (si l'étape 8 n'a pas encore été faite)
+```powershell
+node scripts/dedupe-hubspot-notes.ts --host=$H                 # rapport, aucune modification
+node scripts/dedupe-hubspot-notes.ts --host=$H --apply         # sauvegarde backups\notes-archivees-<hôte>-<date>.json, puis archivage
+# En cas de besoin : recréer les Notes archivées (contenu, date affichée, contact d'origine)
+node scripts/dedupe-hubspot-notes.ts --restore=backups\notes-archivees-<hôte>-<date>.json
+```
+Garder le fichier de sauvegarde hors du dépôt (données personnelles) tant qu'une restauration peut être utile, puis le supprimer.
+
+### 7.6 Retour arrière
+Vercel → **Deployments** → déploiement précédent → **Instant Rollback**. Aucune donnée à restaurer. Les variables `ADMIN_*` peuvent rester (l'ancien code les ignore) ; avec l'ancien code, ton accès redevient bloqué tant que ta fiche est « Plus actif ».

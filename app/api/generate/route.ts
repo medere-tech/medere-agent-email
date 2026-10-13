@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { streamMail } from '@/lib/claude'
 import { parseGeneratedMail } from '@/lib/generated-mail'
-import { getFormationsUpsell, getFormationsDejaFaites } from '@/lib/airtable'
+import { getFormationAndSessions, getFormationsUpsell, getFormationsDejaFaites } from '@/lib/airtable'
+import { checkWeekdays } from '@/lib/session-label'
 import { requireActor, senderFor } from '@/lib/identity'
 import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
 
@@ -24,7 +25,7 @@ export async function POST(req: NextRequest) {
     const { actor } = guard
 
     const body = await req.json()
-    const { commercial_id, formation, sessions, ps } = body
+    const { commercial_id, ps } = body
 
     const resolved = senderFor(actor, commercial_id)
     if (!resolved.ok) return NextResponse.json({ error: resolved.error }, { status: resolved.status })
@@ -33,9 +34,19 @@ export async function POST(req: NextRequest) {
     const limit = await checkRateLimit('generate', actor.email)
     if (!limit.ok) return NextResponse.json({ error: rateLimitMessage('generate', limit.retryAfterSeconds) }, { status: 429 })
 
-    if (!formation || !sessions?.length || !ps) {
+    // Formation et sessions relues côté serveur (cache Airtable) : seuls leurs identifiants viennent
+    // du navigateur ; les dates présentées au PS sont calculées à partir d'Airtable (lib/session-label)
+    const formationId = typeof body.formation?.id === 'string' ? body.formation.id : ''
+    const sessionIds: string[] = Array.isArray(body.session_ids) ? body.session_ids.filter((x: unknown): x is string => typeof x === 'string') : []
+    if (!formationId || !sessionIds.length || !ps) {
       return NextResponse.json({ error: 'Il manque des informations : vérifie la formation, les sessions et le contact.' }, { status: 400 })
     }
+    const selection = await getFormationAndSessions(formationId, sessionIds)
+    if (!selection) return NextResponse.json({ error: "Cette formation n'est plus disponible : choisis-en une autre." }, { status: 400 })
+    if (selection.sessions.length !== sessionIds.length) {
+      return NextResponse.json({ error: 'Une session choisie est introuvable : reviens à l’étape 3 et choisis de nouveau les sessions.' }, { status: 400 })
+    }
+    const { formation, sessions } = selection
 
     if (resolved.onBehalf) console.log('[GENERATE] Génération par', actor.email, 'au nom de', sender.email)
 
@@ -47,7 +58,7 @@ export async function POST(req: NextRequest) {
       if (!formation.public?.length) return []
       try {
         const dateFinMax = sessions
-          .map((s: any) => s.date_cv2 || s.date_fin || s.date_cv1 || '')
+          .map((s) => s.date_cv2 || s.date_fin || s.date_cv1 || '')
           .filter(Boolean)
           .sort()
           .at(-1) || new Date().toISOString().slice(0, 10)
@@ -76,7 +87,7 @@ export async function POST(req: NextRequest) {
           if (cancelled) return
           const params = {
             commercial: { name: sender.name, email: sender.email, phone: sender.phone },
-            formation,
+            formation: { nom: formation.nom, numero: formation.numero, format: formation.format },
             sessions,
             ps,
             formationsLiees,
@@ -89,6 +100,11 @@ export async function POST(req: NextRequest) {
           if (cancelled) return
           const { sujet, corps } = parseGeneratedMail(full)
           if (!sujet || !corps) throw new Error('Réponse incomplète (objet ou texte manquant)')
+          // Contrôle des jours de la semaine : l'avertissement est affiché à l'étape 5 (recalculé par le
+          // navigateur à chaque modification du texte) ; ici, seulement journalisé
+          const datesKo = checkWeekdays(`${sujet}
+${corps}`)
+          if (datesKo.length) console.warn('[GENERATE] Jours de la semaine incohérents dans le mail rédigé :', datesKo.map((w) => w.extrait).join(' | '))
           emit({ t: 'done', sujet, corps })
         } catch (e: any) {
           console.error('[GENERATE] Rédaction en échec :', e.message)

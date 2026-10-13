@@ -3,6 +3,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { linkWarnings, renderMail } from '@/lib/render-mail'
 import { parseGeneratedMail } from '@/lib/generated-mail'
+import { checkWeekdays } from '@/lib/session-label'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 // Fiche commercial (id Airtable) : le serveur relit nom, email, HubSpot et Slack à partir de l'id
@@ -391,6 +392,9 @@ export default function AgentMail() {
   // Aperçu fidèle : même fonction de rendu que l'envoi ; avertissements une fois la rédaction finie
   const previewHtml = useMemo(() => renderMail(mailCorps).html, [mailCorps])
   const warnings = useMemo(() => (generating ? [] : linkWarnings(mailCorps)), [mailCorps, generating])
+  // Jours de la semaine contrôlés sur le texte final (et à chaque modification)
+  const dateWarnings = useMemo(() => (generating ? [] : checkWeekdays(`${mailSujet}
+${mailCorps}`)), [mailSujet, mailCorps, generating])
 
   const toggleSession = (s: Session) => {
     setSelectedSessions((prev) =>
@@ -422,13 +426,8 @@ export default function AgentMail() {
         body: JSON.stringify({
           commercial_id: commercial.id,
           formation: { id: formation.id, nom: formation.nom, numero: formation.numero, format: formation.format, public: formation.public },
-          sessions: selectedSessions.map((s) => ({
-            numero: s.numero,
-            date_cv1: s.date_cv1,
-            date_cv2: s.date_cv2,
-            date_debut: s.date_debut,
-            temps_lisible: s.temps_lisible,
-          })),
+          // Identifiants seulement : dates et libellés relus et calculés côté serveur (Airtable)
+          session_ids: selectedSessions.map((s) => s.id),
           ps: {
             titre: psTitre,
             nom: psContact.lastname,
@@ -644,14 +643,14 @@ export default function AgentMail() {
                 <h2 className="text-base font-semibold text-zinc-900 mb-0.5">Qui envoie ce mail ?</h2>
                 <p className="text-sm text-zinc-500">
                   {me.role === 'admin'
-                    ? "Tu peux envoyer au nom de n'importe quel commercial actif : ce sera indiqué dans la Note HubSpot."
+                    ? "Le mail part à ton nom par défaut. Tu peux aussi l'envoyer au nom de n'importe quel commercial actif : ce sera indiqué dans la Note HubSpot."
                     : 'Le mail part à ton nom, avec ta signature.'}
                 </p>
               </div>
               {me.role === 'admin' ? (
                 <Select
-                  options={commerciaux.map((c) => ({ label: c.name, ...c }))}
-                  value={commercial ? { label: commercial.name, ...commercial } : null}
+                  options={commerciaux.map((c) => ({ label: c.id === me.commercial?.id ? `${c.name} (moi)` : c.name, ...c }))}
+                  value={commercial ? { label: commercial.id === me.commercial?.id ? `${commercial.name} (moi)` : commercial.name, ...commercial } : null}
                   onChange={(v) => setCommercial({ id: v.id, name: v.name, email: v.email })}
                   placeholder="Sélectionner un commercial..."
                 />
@@ -992,6 +991,20 @@ export default function AgentMail() {
                   )}
                 </div>
               </div>
+
+              {dateWarnings.length > 0 && (
+                <div className="p-3 bg-white border border-zinc-900 rounded-lg text-sm text-zinc-900" data-alerte="dates">
+                  <div className="flex items-start gap-2 font-medium">
+                    <Icons.Warning />
+                    <span>{dateWarnings.length === 1 ? 'Une date incohérente' : `${dateWarnings.length} dates incohérentes`} : corrige le texte avant l'envoi</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 space-y-1 text-xs">
+                    {dateWarnings.map((w, i) => (
+                      <li key={i}><span className="font-mono bg-zinc-100 px-1 rounded">{w.extrait}</span> : {w.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               {warnings.length > 0 && (
                 <div className="p-3 bg-white border border-zinc-300 rounded-lg text-sm text-zinc-700" data-alerte="liens">

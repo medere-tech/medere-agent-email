@@ -1,4 +1,4 @@
-import { ALERT_SLACK_USER_ID } from '@/lib/config'
+import { alertSlackUserId } from '@/lib/config'
 
 // DM Slack (conversations.open crée le canal si besoin, aucune action du destinataire).
 // Lève une erreur lisible si Slack refuse.
@@ -26,12 +26,12 @@ export async function sendSlackDM(userId: string, text: string): Promise<void> {
   if (!msgData.ok) throw new Error(`Slack chat.postMessage : ${msgData.error}`)
 }
 
-// Alerte technique (destinataire fixe : ALERT_SLACK_USER_ID). Ne lève jamais : une alerte
+// Alerte technique (destinataire : l'administrateur, ADMIN_SLACK_USER_ID). Ne lève jamais : une alerte
 // impossible à envoyer est seulement journalisée.
 export async function sendAlert(title: string, lines: string[]): Promise<void> {
   const text = `*⚠️ Agent Mail — ${title}*\n${lines.map((l) => `• ${l}`).join('\n')}`
   try {
-    await sendSlackDM(ALERT_SLACK_USER_ID, text.slice(0, 3800))
+    await sendSlackDM(alertSlackUserId(), text.slice(0, 3800))
   } catch (e: any) {
     console.error('[ALERTE] DM d’alerte non envoyé :', e.message, '—', title, lines)
   }

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { linkWarnings } from '@/lib/render-mail'
+import { checkWeekdays } from '@/lib/session-label'
 
 // Fenêtre de relance d'un mail (ouverte depuis /suivi ou depuis le lien du DM Slack J+3) :
 // objet et texte pré-remplis, modifiables, rédigés une seule fois par Claude (le bouton disparaît
@@ -78,6 +79,9 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
   const sendingRef = useRef(false)
   // Liens mal formés (même contrôle que l'étape 5 de l'envoi), non bloquant
   const warnings = useMemo(() => linkWarnings(corps), [corps])
+  // Jours de la semaine contrôlés sur le texte de la relance (et à chaque modification)
+  const dateWarnings = useMemo(() => (generating ? [] : checkWeekdays(`${sujet}
+${corps}`)), [sujet, corps, generating])
   // Clé d'idempotence de cette relance : un double clic ou un renvoi n'envoie qu'une relance
   const keyRef = useRef(typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))
 
@@ -194,6 +198,19 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
                   className="w-full px-3.5 py-2.5 border border-zinc-200 rounded-lg text-sm font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-zinc-900/10 resize-y"
                 />
               </div>
+              {dateWarnings.length > 0 && (
+                <div className="p-3 bg-white border border-zinc-900 rounded-lg text-xs text-zinc-900" data-alerte="dates">
+                  <div className="flex items-start gap-2 font-medium">
+                    <Icon.Warning />
+                    <span>{dateWarnings.length === 1 ? 'Une date incohérente' : `${dateWarnings.length} dates incohérentes`} : corrige le texte avant l'envoi</span>
+                  </div>
+                  <ul className="mt-1.5 ml-6 space-y-1">
+                    {dateWarnings.map((w, i) => (
+                      <li key={i}><span className="font-mono bg-zinc-100 px-1 rounded">{w.extrait}</span> : {w.message}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               {warnings.length > 0 && (
                 <div className="p-3 bg-white border border-zinc-300 rounded-lg text-xs text-zinc-700" data-alerte="liens">
                   <div className="flex items-start gap-2 font-medium">

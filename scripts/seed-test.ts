@@ -17,8 +17,9 @@
  *   KV_REST_API_URL, KV_REST_API_TOKEN, RESEND_WEBHOOK_SECRET (commande webhook)
  * Variables à fournir (environnement ou .env.local) :
  *   TEST_KV_HOST            hôte de la base KV de test — le script refuse toute autre base
- *   TEST_HUBSPOT_CONTACT_ID contact HubSpot de test (ex. 18421683158)
- *   TEST_PS_EMAIL           adresse de test (ex. dethie@medere.fr)
+ *   TEST_HUBSPOT_CONTACT_ID contact HubSpot de test (ex. 10000000001)
+ *   TEST_PS_EMAIL           adresse de test (ex. prenom.nom@example.com)
+ *   ADMIN_EMAIL, ADMIN_NAME, ADMIN_HUBSPOT_OWNER_ID  fiche commercial de test (= profil administrateur)
  *   TEST_SLACK_USER_ID      Slack ID qui recevra les DM de relance (option --relance)
  *   TEST_APP_URL            URL de l'app locale (défaut http://localhost:3000)
  *
@@ -32,7 +33,7 @@
  *   email_track:test-purge-*         (--purge) envois au PS de test au nom de Zacharie / Kaoufer (adresse seule)
  *   email_track:test-autre-ps-*      (--purge) envois à un PS fictif (99999999999) qui doivent rester intacts
  *   relance:test-purge-zacharie / relance:test-autre-ps   (--purge) anciennes relances (PS de test / autre PS)
- *   email_track:test-rel-*           (--relances) envois de la fiche Dethie Faye, relance J+3 due (non ouvert il y a 2 jours,
+ *   email_track:test-rel-*           (--relances) envois de la fiche de test (profil administrateur), relance J+3 due (non ouvert il y a 2 jours,
  *                                    ouvert, cliqué, adresse invalide, indésirable, déjà relancé, sans Slack) + un envoi
  *                                    de « Zacharie » sans échéance (refus de relance) ; relance:test-rel-legacy (legacy)
  *   emails_index                     + les ids ci-dessus
@@ -51,7 +52,7 @@ const CLICK_IDS = ['test-click-a', 'test-click-b', 'test-click-c']
 // --purge : envois au PS de test au nom de vrais commerciaux (à purger) et envois à un PS fictif (à garder)
 const PURGE_IDS = ['test-purge-zacharie', 'test-purge-kaoufer-email', 'test-autre-ps-zacharie', 'test-autre-ps-sarah']
 const OTHER_PS = { contact_id: '99999999999', ps_email: 'ps.fictif@example.invalid', ps_nom: 'Docteur PS Fictif' }
-// --relances : envois de la fiche de test (Dethie Faye) avec relance J+3 due, statuts variés
+// --relances : envois de la fiche de test (profil administrateur, variables ADMIN_*) avec relance J+3 due, statuts variés
 const RELANCE_IDS = ['test-rel-non-ouvert', 'test-rel-ouvert', 'test-rel-clique', 'test-rel-bounce', 'test-rel-plainte', 'test-rel-deja', 'test-rel-sans-slack', 'test-rel-zacharie']
 // --historique : envois récents au contact de test (alerte « déjà contacté » de l'étape 4)
 const HISTORY_IDS = ['test-hist-2j', 'test-hist-6j', 'test-hist-6j-relance', 'test-hist-20j', 'test-hist-autre']
@@ -196,15 +197,15 @@ async function seed(withRelance: boolean, withNames: boolean, withClicks: boolea
   }
 
   if (withRelances) {
-    // Fiche de test Dethie Faye ; tous les identifiants Slack sont TEST_SLACK_USER_ID
+    // Fiche de test (profil administrateur) ; tous les identifiants Slack sont TEST_SLACK_USER_ID
     const slackId = required('TEST_SLACK_USER_ID')
     const today = iso.split('T')[0]
     const dayMs = (d: string) => Date.parse(`${d}T00:00:00Z`)
     const minus = (n: number) => new Date(now.getTime() - n * 86400000).toISOString().split('T')[0]
     const common = {
-      ...base, ps_nom: 'Monsieur Dethie Faye', ps_titre: 'Monsieur', ps_lastname: 'Faye', ps_rpps: '',
-      commercial_name: 'Dethie Faye', commercial_email: 'dethie@medere.fr', commercial_key: 'dethie@medere.fr',
-      commercial_slack_id: slackId, commercial_hubspot_id: '176772849', kind: 'initial',
+      ...base, ps_nom: 'Monsieur Test', ps_titre: 'Monsieur', ps_lastname: 'Test', ps_rpps: '',
+      commercial_name: required('ADMIN_NAME'), commercial_email: required('ADMIN_EMAIL').toLowerCase(), commercial_key: required('ADMIN_EMAIL').toLowerCase(),
+      commercial_slack_id: slackId, commercial_hubspot_id: required('ADMIN_HUBSPOT_OWNER_ID'), kind: 'initial',
       formation_nom: 'Formation de test', formation_numero: '00000000000', opened_at: null, clicked_at: null,
     }
     const t = (n: number) => new Date(now.getTime() - n * 86400000).toISOString()
@@ -335,8 +336,9 @@ async function webhook(kind: string, emailId: string, args: string[]): Promise<v
 // Le contact de test (TEST_HUBSPOT_CONTACT_ID) reçoit quelques envois ; les autres PS sont fictifs.
 const SUIVI_COUNT = 60
 const SUIVI_IDS = Array.from({ length: SUIVI_COUNT }, (_, i) => `test-suivi-${String(i + 1).padStart(3, '0')}`)
-const SUIVI_COMMERCIAUX = [
-  { key: 'dethie@medere.fr', name: 'Dethie Faye', weight: 5 },
+// Le premier est la fiche de test (profil administrateur, variables ADMIN_*), lu au lancement
+const SUIVI_COMMERCIAUX = () => [
+  { key: required('ADMIN_EMAIL').toLowerCase(), name: required('ADMIN_NAME'), weight: 5 },
   { key: 'zacharie@medere.fr', name: 'Zacharie Groch', weight: 3 },
   { key: 'sarah.s@medere.fr', name: 'Sarah S.', weight: 2 },
 ]
@@ -360,6 +362,7 @@ function parisDayOf(ms: number): string {
 async function seedSuivi(): Promise<void> {
   const contactId = required('TEST_HUBSPOT_CONTACT_ID')
   const slackId = required('TEST_SLACK_USER_ID')
+  const suiviCommerciaux = SUIVI_COMMERCIAUX()
   let seedState = 42
   const rnd = () => { seedState = (seedState * 1103515245 + 12345) % 2147483648; return seedState / 2147483648 }
   const pick = <T,>(list: T[], weights?: number[]) => {
@@ -400,10 +403,10 @@ async function seedSuivi(): Promise<void> {
     const id = SUIVI_IDS[i]
     const daysAgo = Math.floor((i * 46) / SUIVI_COUNT) + Math.floor(rnd() * 3)
     const sentMs = now - daysAgo * 86400000 - Math.floor(rnd() * 8 * 3600000) - 60000
-    const c = pick(SUIVI_COMMERCIAUX, SUIVI_COMMERCIAUX.map((x) => x.weight))
+    const c = pick(suiviCommerciaux, suiviCommerciaux.map((x) => x.weight))
     const [numero, nom] = pick(SUIVI_FORMATIONS)
-    const testContact = c.key === 'dethie@medere.fr' && i % 9 === 0
-    const [psNom, psSlug] = testContact ? ['Docteur Dethie Faye', ''] : pick(SUIVI_PS)
+    const testContact = c.key === suiviCommerciaux[0].key && i % 9 === 0
+    const [psNom, psSlug] = testContact ? ['Docteur Test', ''] : pick(SUIVI_PS)
     const statut = pick(statuts, statutWeights)
     const t = (h: number) => new Date(sentMs + h * 3600000).toISOString()
     const e: Record<string, any> = {
@@ -437,7 +440,7 @@ async function seedSuivi(): Promise<void> {
     }
     await write(id, e, true)
   }
-  for (const c of SUIVI_COMMERCIAUX) await kv('HSET', 'meta:commerciaux', c.key, c.name)
+  for (const c of suiviCommerciaux) await kv('HSET', 'meta:commerciaux', c.key, c.name)
   for (const [day, m] of Array.from(counters.entries())) {
     for (const [field, n] of Array.from(m.entries())) await kv('HINCRBY', `stats:day:${day}`, field, n)
     await kv('EXPIRE', `stats:day:${day}`, 7 * 86400)

@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { REDACTION_MODEL } from '@/lib/config'
-import { NO_TRACKING_RULE, SMS_STEP, SMS_TIP, dpcStepsText, sessionsText as formatSessions, type SessionForText } from '@/lib/dpc-steps'
+import { NO_TRACKING_RULE, SMS_STEP, SMS_TIP, dpcStepsText } from '@/lib/dpc-steps'
+import { sessionLabels, type SessionDates } from '@/lib/session-label'
 
 // Clé lue à chaque appel (comme le jeton HubSpot) : un changement de clé est pris en compte sans redémarrage
 let cached: { key: string; client: Anthropic } | null = null
@@ -13,23 +14,23 @@ function anthropic(): Anthropic {
 export interface GenerateMailParams {
   commercial: { name: string; email: string; phone?: string }
   formation: { nom: string; numero: string; format: string }
-  sessions: Array<{
-    numero: string
-    date_cv1: string
-    date_cv2?: string
-    date_debut: string
-    temps_lisible: string
-  }>
+  // Sessions relues côté serveur dans Airtable ; libellés calculés par lib/session-label
+  sessions: SessionDates[]
   ps: { titre: string; nom: string; prenom: string; specialite?: string }
   formationsLiees: Array<{ nom: string; format: string; prochaineSession?: string; url_webflow?: string }>
 }
+
+// Les jours de la semaine et les dates sont calculés dans le code (fuseau Europe/Paris) : le modèle
+// les recopie, il ne les calcule jamais (constat d'octobre 2026 : « lundi 13 octobre » pour un mardi).
+// Le texte rédigé est ensuite contrôlé (checkWeekdays) : avertissement à l'étape 5 et dans la relance.
+export const DATES_RULE = `DATES (règle absolue) : les dates, jours de la semaine et horaires des sessions sont fournis ci-dessus, déjà calculés. Recopie-les exactement, caractère pour caractère. Ne calcule, ne déduis, ne complète ni ne reformule aucune date, aucun jour de la semaine ni aucun horaire. N'ajoute jamais de jour de la semaine à une date qui n'en a pas, et n'écris aucune autre date que celles fournies.`
 
 // Prompt du mail initial. Réponse attendue en texte : « Objet : … », une ligne vide, puis le mail
 // (format lisible au fil de l'eau pour l'affichage progressif, voir lib/generated-mail.ts).
 export function buildMailPrompt(params: GenerateMailParams): string {
   const { commercial, formation, sessions, ps, formationsLiees } = params
 
-  const sessionsText = formatSessions(sessions)
+  const sessionsText = sessionLabels(sessions, formation.format)
 
   const upsellText =
     formationsLiees.length > 0
@@ -49,8 +50,11 @@ CONTEXTE :
 - Formation souhaitée : "${formation.nom}"
 - Numéro d'action DPC : ${formation.numero}
 - Format : ${formation.format}
-- Sessions disponibles :
+
+SESSIONS (bloc à recopier MOT POUR MOT dans le mail, une ligne par session, sans rien changer) :
 ${sessionsText}
+
+${DATES_RULE}
 
 OBJECTIF DU MAIL :
 Aider le PS à finaliser son inscription sur agencedpc.fr avec les étapes précises. Être chaleureux, concis, et rassurant.
@@ -63,7 +67,7 @@ Juste après les étapes, ajoute ce conseil en une phrase : « ${SMS_TIP} »
 
 RAPPEL CLÉ : Les formations sont intégralement prises en charge par l'ANDPC.
 
-SESSIONS À PROPOSER : Mentionne toutes les sessions listées ci-dessus avec leurs dates exactes.
+SESSIONS À PROPOSER : recopie le bloc SESSIONS ci-dessus tel quel (toutes les lignes, mot pour mot).
 
 UPSELL (en fin de mail, si pertinent) :${upsellText || ' Aucune formation complémentaire à mentionner.'}
 
@@ -80,7 +84,6 @@ STYLE :
 - Invitation à revenir vers le commercial
 - Signature complète
 - N'oublie pas de dire Bonjour,
-- Les formations en classe viruelle ont lieu en soirée à partir de 19h00
 - Si tu dois utiliser des tirets, utilise des tirets courts (-) et n'utilise jamais de tirets longs
 
 ${NO_TRACKING_RULE}
@@ -112,7 +115,9 @@ export interface GenerateRelanceParams {
   ps: { titre: string; nom: string }
   formationNom: string
   formationNumero: string
-  sessions: SessionForText[]
+  // Format de la formation et sessions relues dans Airtable (libellés calculés par lib/session-label)
+  format: string
+  sessions: SessionDates[]
 }
 
 // Relance d'un mail déjà envoyé. Le statut du premier mail (ouvert, cliqué…) n'est JAMAIS transmis :
@@ -120,8 +125,11 @@ export interface GenerateRelanceParams {
 // Elle se suffit à elle-même (formation, sessions, numéro DPC, 7 étapes, signature) : le premier
 // mail n'est pas recopié (il peut contenir l'ancien parcours en 6 étapes).
 export function buildRelancePrompt(params: GenerateRelanceParams): string {
-  const { commercial, ps, formationNom, formationNumero, sessions } = params
-  const sessionsBlock = sessions.length ? formatSessions(sessions) : 'Aucune session à citer (ne pas en inventer) : inviter le PS à choisir la session qui lui convient dans « Liste sessions ».'
+  const { commercial, ps, formationNom, formationNumero, format, sessions } = params
+  const sessionsBlock = sessions.length
+    ? `(bloc à recopier MOT POUR MOT, une ligne par session, sans rien changer)
+${sessionLabels(sessions, format)}`
+    : 'Aucune session à citer (ne pas en inventer) : inviter le PS à choisir la session qui lui convient dans « Liste sessions ».'
   return `Tu es un assistant commercial pour Médéré, organisme de formation médicale DPC.
 Rédige une RELANCE courte pour un professionnel de santé à qui le commercial a déjà envoyé les informations d'une formation : 2 à 4 lignes d'introduction neutre, les sessions disponibles, le parcours d'inscription à jour, puis la signature.
 
@@ -132,6 +140,8 @@ CONTEXTE :
 - Numéro d'action DPC : ${formationNumero || 'inconnu'}
 - Sessions disponibles :
 ${sessionsBlock}
+
+${DATES_RULE}
 
 INTRODUCTION : neutre, du type « Je me permets de revenir vers vous concernant la formation … ». Rappelle que la formation est intégralement prise en charge par l'ANDPC et propose ton aide pour l'inscription.
 
