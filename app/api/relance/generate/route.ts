@@ -4,6 +4,7 @@ import { requireActor } from '@/lib/identity'
 import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
 import { STORED_RELANCE_VERSION, checkRelance, relanceSessions, storedRelance, type StoredRelance } from '@/lib/relance'
 import { generateRelance } from '@/lib/claude'
+import { checkWeekdays } from '@/lib/session-label'
 import { getKv } from '@/lib/kv'
 import { KEYS, RELEASE_LOCK_SCRIPT } from '@/lib/kv-schema'
 import { RETENTION_DAYS } from '@/lib/config'
@@ -61,8 +62,10 @@ export async function POST(req: NextRequest) {
         ps: { titre: entry.ps_titre || '', nom: entry.ps_lastname || '' },
         formationNom: entry.formation_nom || '',
         formationNumero: entry.formation_numero || '',
-        sessions: await relanceSessions(entry),
+        ...(await relanceSessions(entry)),
       })
+      const datesKo = checkWeekdays(corps)
+      if (datesKo.length) console.warn('[RELANCE] Jours de la semaine incohérents dans la relance rédigée :', id, datesKo.map((w) => w.extrait).join(' | '))
       const stored: StoredRelance = { v: STORED_RELANCE_VERSION, corps, generated_at: new Date().toISOString(), generated_by: actor.email }
       await kv.set(KEYS.relanceDraft(id), stored, { ex: RETENTION_DAYS * 86400 })
       return NextResponse.json({ corps })

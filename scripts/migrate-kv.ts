@@ -87,7 +87,7 @@ const backupDir = resolve(option('backup-dir') || 'backups')
 
 function assertHost(): string {
   const expected = option('host')
-  if (!expected) fail('Option obligatoire : --host=<hôte de la base KV> (ex. close-imp-209245.upstash.io)')
+  if (!expected) fail('Option obligatoire : --host=<hôte de la base KV> (ex. exemple-12345.upstash.io)')
   const actual = new URL(required('KV_REST_API_URL')).host
   if (actual !== expected) fail(`REFUS : KV_REST_API_URL pointe sur ${actual}, pas sur ${expected}.`)
   return actual

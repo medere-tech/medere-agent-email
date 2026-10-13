@@ -1,9 +1,11 @@
 import { Resend } from 'resend'
 import { getKv } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
-import { STATUT_ACTIF, normalizeEmail, type Fiche } from '@/lib/roles'
+import { STATUT_ACTIF, adminFiche, normalizeEmail, type Fiche } from '@/lib/roles'
 import type { Actor } from '@/lib/identity'
-import { SMS_TIP, dpcStepsText, sessionsText, type SessionForText } from '@/lib/dpc-steps'
+import { adminProfile } from '@/lib/config'
+import { SMS_TIP, dpcStepsText } from '@/lib/dpc-steps'
+import { sessionLabels, type SessionDates } from '@/lib/session-label'
 import { getFormationsActives, getSessionsByFormation } from '@/lib/airtable'
 
 const resend = new Resend(process.env.RESEND_API_KEY!)
@@ -53,8 +55,12 @@ export function relanceVerdict(actor: Actor, entry: Record<string, any> | null):
     return { ok: false, status: 403, error: "Seul le commercial qui a envoyé ce mail peut le relancer." }
   }
 
-  // La relance part au nom du commercial du mail d'origine, s'il est toujours actif
-  const sender = actor.fiches.find((f) =>
+  // La relance part au nom du commercial du mail d'origine, s'il est toujours actif. Mail envoyé
+  // par l'administrateur en son nom : relancé au nom de son profil (variables ADMIN_*), quel que
+  // soit l'état de sa fiche Airtable.
+  const admin = adminProfile()
+  const adminSender = admin && authorEmail && authorEmail === normalizeEmail(admin.email) ? adminFiche(admin) : null
+  const sender = adminSender || actor.fiches.find((f) =>
     f.statut === STATUT_ACTIF && (authorEmail ? normalizeEmail(f.email) === authorEmail : f.name.trim() === String(entry.commercial_name || '').trim()))
   if (!sender) return { ok: false, status: 409, error: "Le commercial qui a envoyé ce mail n'est plus actif : relance impossible." }
   const sentBy = !isAuthor ? { email: actor.email, name: actor.name } : undefined
@@ -62,17 +68,20 @@ export function relanceVerdict(actor: Actor, entry: Record<string, any> | null):
 }
 
 // Sessions à présenter dans la relance : prochaines sessions de la formation (par numéro DPC),
-// relues dans le cache Airtable (jamais attendu) ; au plus 3. Aucune session trouvée → liste vide.
-export async function relanceSessions(entry: Record<string, any>): Promise<SessionForText[]> {
+// relues dans le cache Airtable (jamais attendu) ; au plus 3, avec le format de la formation (libellés
+// calculés par lib/session-label). Aucune session trouvée → liste vide.
+export interface RelanceSessions { format: string; sessions: SessionDates[] }
+
+export async function relanceSessions(entry: Record<string, any>): Promise<RelanceSessions> {
   const numero = String(entry.formation_numero || '').trim()
-  if (!numero) return []
+  if (!numero) return { format: '', sessions: [] }
   try {
     const formation = (await getFormationsActives()).find((f) => String(f.numero).trim() === numero)
-    if (!formation) return []
-    return (await getSessionsByFormation(formation.id, formation.format)).slice(0, 3)
+    if (!formation) return { format: '', sessions: [] }
+    return { format: formation.format, sessions: (await getSessionsByFormation(formation.id, formation.format)).slice(0, 3) }
   } catch (e: any) {
     console.error('[RELANCE] Sessions indisponibles :', e.message)
-    return []
+    return { format: '', sessions: [] }
   }
 }
 
@@ -103,7 +112,7 @@ export function relanceSubject(entry: Record<string, any>): string {
 // Brouillon de relance, IDENTIQUE quel que soit le statut du mail d'origine (RGPD : rien ne laisse
 // deviner le suivi des ouvertures ou des clics) : formule d'appel, introduction neutre, sessions,
 // parcours d'inscription à jour en 7 étapes, signature. Le mail d'origine n'est pas recopié.
-export function relanceDraft(entry: Record<string, any>, sessions: SessionForText[], sender: { name: string; email?: string; phone?: string }): string {
+export function relanceDraft(entry: Record<string, any>, { format, sessions }: RelanceSessions, sender: { name: string; email?: string; phone?: string }): string {
   const titre = String(entry.ps_titre || '').trim()
   const nom = String(entry.ps_lastname || '').trim()
   const greeting = titre && nom ? `Bonjour ${titre} ${nom},` : 'Bonjour,'
@@ -113,7 +122,7 @@ export function relanceDraft(entry: Record<string, any>, sessions: SessionForTex
     greeting, '',
     `Je me permets de revenir vers vous concernant la formation « ${formation} », dont je vous ai transmis les informations${date ? ` le ${date}` : ''}. Cette formation est intégralement prise en charge par l'ANDPC.`, '',
   ]
-  if (sessions.length) parts.push(sessions.length > 1 ? 'Voici les sessions disponibles :' : 'Voici la session disponible :', sessionsText(sessions), '')
+  if (sessions.length) parts.push(sessions.length > 1 ? 'Voici les sessions disponibles :' : 'Voici la session disponible :', sessionLabels(sessions, format), '')
   parts.push(
     "Pour vous inscrire, voici les étapes (l'ANDPC demande désormais un code reçu par SMS) :",
     dpcStepsText(String(entry.formation_numero || '')), '', SMS_TIP, '',
@@ -126,9 +135,10 @@ export function relanceDraft(entry: Record<string, any>, sessions: SessionForTex
 
 // Relance rédigée par Claude : une seule génération par mail d'origine. Le brouillon est gardé
 // (relance_draft:{id}, purgé avec l'envoi) et renvoyé à toute demande suivante, sans appel à Claude.
-// v: 2 = relance neutre (sans statut ni mail d'origine recopié). Un brouillon d'un format antérieur
-// est ignoré et rédigé de nouveau.
-export const STORED_RELANCE_VERSION = 2
+// v: 2 = relance neutre (sans statut ni mail d'origine recopié) ; v: 3 = sessions recopiées depuis les
+// libellés calculés dans le code (jours de la semaine exacts). Un brouillon d'un format antérieur est
+// ignoré et rédigé de nouveau.
+export const STORED_RELANCE_VERSION = 3
 
 export interface StoredRelance {
   v: number

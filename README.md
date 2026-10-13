@@ -105,21 +105,23 @@ medere-agent-email/
 │   ├── suivi-query.ts                    # Requête de /suivi : filtres, période (Paris), compteurs, script Lua
 │   ├── auth.ts                           # Session JWT (cookie)
 │   ├── claude.ts                         # Génération mail IA
-│   ├── config.ts                         # Constantes (RETENTION_DAYS, seuil des événements automatiques…)
+│   ├── config.ts                         # Constantes (RETENTION_DAYS…) et profil administrateur (variables ADMIN_*)
 │   ├── hubspot.ts                        # Recherche contacts + Notes HubSpot
 │   ├── identity.ts                       # Personne connectée, rôle, contrôle d'accès des routes
 │   ├── ratelimit.ts                      # Limites de débit (KV)
 │   ├── roles.ts                          # Règles des rôles et choix de l'expéditeur (fonctions pures)
+│   ├── session-label.ts                  # Libellés des sessions (jours calculés, Paris) et contrôle des dates (fonctions pures)
 │   ├── kv.ts                             # Client Upstash Redis (KV_REST_API_URL / KV_REST_API_TOKEN)
 │   ├── kv-schema.ts                      # Noms de clés KV, jours, scripts Lua atomiques (sans import)
 │   └── tracking.ts                       # Enregistrement des envois, événements webhook, stats, purge RGPD
 ├── docs/
 │   └── TESTS.md                          # Protocole de test complet
 ├── scripts/
-│   ├── dedupe-hubspot-notes.ts           # Archive les Notes HubSpot ouvert / cliqué en double
+│   ├── dedupe-hubspot-notes.ts           # Archive (après sauvegarde) et restaure les Notes HubSpot ouvert / cliqué en double
 │   ├── migrate-kv.ts                     # Export / migration v2 / vérification / restauration des données KV
 │   ├── purge-test-sends.ts               # Supprime du KV les envois au PS de test
-│   └── seed-test.ts                      # Crée / supprime les données de test (base KV de test)
+│   ├── seed-test.ts                      # Crée / supprime les données de test (base KV de test)
+│   └── test-session-dates.ts             # Tests des libellés de session et du contrôle des jours
 ├── backups/                              # Exports KV (migrate-kv.ts --export) — ignoré par git
 ├── instrumentation.ts                    # Démarrage du serveur : préchauffage des données Airtable
 ├── middleware.ts                         # Protection des routes + CVE-2025-29927
@@ -150,6 +152,15 @@ medere-agent-email/
 | `GOOGLE_CLIENT_SECRET` | Secret Google OAuth | Google Cloud Console |
 | `NEXTAUTH_SECRET` | Secret signature JWT sessions — **obligatoire** : sans lui, les pages protégées et le callback répondent 500 | Générer avec `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `NEXTAUTH_URL` | URL de l'app (sert au `redirect_uri` OAuth) | `https://medere-agent-email-dpc.vercel.app` (prod) ou `http://localhost:3000` (local) |
+| `ADMIN_EMAIL` | Email Google de l'administrateur (voir « Rôles et accès ») | ex. `prenom.nom@medere.fr` |
+| `ADMIN_NAME` | Nom affiché et signature de l'administrateur | ex. `Prénom Nom` |
+| `ADMIN_HUBSPOT_OWNER_ID` | Owner HubSpot de l'administrateur (Notes de ses envois) | HubSpot → Paramètres → Utilisateurs (ex. `100000001`) |
+| `ADMIN_SLACK_USER_ID` | Slack de l'administrateur : DM de relance de ses envois et **alertes techniques** | Slack → profil → « Copier l'ID de membre » (ex. `U00000000AA`) |
+| `ADMIN_PHONE` | Téléphone de la signature de l'administrateur — **facultatif** | — |
+
+> Une variable `ADMIN_*` obligatoire manquante désactive le rôle administrateur (avertissement `[CONFIG] Rôle administrateur désactivé` dans les journaux) sans arrêter l'app ; les alertes techniques ne partent plus (journalisées seulement).
+>
+> **Développement local uniquement** : `DEV_FORCE_ROLE` (voir « Rôles et accès ») et les `TEST_*` des scripts (`docs/TESTS.md`). Ne jamais les créer sur Vercel : `DEV_FORCE_ROLE` y serait ignorée et une erreur journalisée.
 
 > `NEXTAUTH_SECRET` et `NEXTAUTH_URL` gardent ce nom historique, mais l'app n'utilise pas la librairie next-auth.
 
@@ -170,7 +181,7 @@ medere-agent-email/
 ### Les 6 étapes du formulaire
 
 **Étape 1 — Commercial**
-Commercial connecté présélectionné et verrouillé ; un administrateur peut choisir n'importe quel commercial actif (voir « Rôles et accès »).
+Commercial connecté présélectionné et verrouillé ; l'administrateur envoie à son nom par défaut (« Prénom Nom (moi) », profil des variables `ADMIN_*`) ou choisit n'importe quel commercial actif (voir « Rôles et accès »).
 
 **Étape 2 — Formation**
 Sélection de la formation : formations `Active` avec numéro DPC (voir la constante `FORMATIONS_REQUIRE_FUTURE_SESSION` dans la section Airtable).
@@ -188,6 +199,12 @@ Si HubSpot ne répond pas, l'app affiche « HubSpot indisponible, ne crée pas l
 
 **Étape 5 — Aperçu**
 - **Rédaction au fil de l'eau** : l'étape 5 s'ouvre dès que le serveur répond (contrôles d'identité et de débit seulement ; les formations proposées sont calculées ensuite, dans le flux) ; l'objet puis le texte s'écrivent progressivement pendant que Claude rédige (`/api/generate` répond en NDJSON : `start`, `delta`, `done` ou `error` ; format demandé à Claude : « Objet : … », ligne vide, texte — lu par `lib/generated-mail.ts`). Pendant la rédaction, les champs sont en lecture seule et l'envoi désactivé ; « Retour » annule la rédaction (le serveur arrête Claude). En cas d'échec, retour à l'étape 4 avec « La rédaction du mail a échoué. Réessaie. ».
+- **Dates des sessions calculées dans le code** (`lib/session-label.ts`), jamais par Claude : à partir des dates Airtable, en fuseau Europe/Paris, chaque session reçoit un libellé complet que Claude recopie mot pour mot (règle `DATES_RULE` du prompt : interdiction de calculer, déduire ou reformuler une date, un jour ou un horaire). `/api/generate` ne reçoit du navigateur que les identifiants de la formation et des sessions, et relit leurs dates dans le cache Airtable (`getFormationAndSessions`).
+  - classe virtuelle : 1ère et 2ème soirée (jamais la date de début de session si elle diffère), « en soirée à partir de 19h00 » — « Session 26.010 : mardi 13 et jeudi 15 octobre 2026, en soirée à partir de 19h00 » ;
+  - présentiel : date du présentiel — « Session 26.004 : jeudi 17 décembre 2026 » (aucun horaire : il n'existe pas dans Airtable) ;
+  - e-learning : « Session 26.038 : du jeudi 1er octobre 2026 au jeudi 15 avril 2027 ».
+  Même libellé dans la relance rédigée et le brouillon de relance. Le champ `Temps lisible (Webflow)` n'est plus utilisé dans les mails.
+- **Contrôle des jours de la semaine** (`checkWeekdays`, `lib/session-label.ts`) : chaque « jour + date » du texte (« lundi 13 octobre 2026 », « mardi 13 et jeudi 15 octobre », date sans année) est comparé au calendrier réel. Une incohérence affiche, à l'étape 5 et dans la fenêtre de relance, un avertissement « N dates incohérentes : corrige le texte avant l'envoi » avec le jour exact (« le 13 octobre 2026 est un mardi, pas un lundi »), recalculé à chaque modification du texte ; non bloquant. Elle est aussi journalisée côté serveur (`[GENERATE]` / `[RELANCE] Jours de la semaine incohérents`). Tests : `node scripts/test-session-dates.ts`.
 - **Parcours d'inscription en 7 étapes** (`lib/dpc-steps.ts`, source unique pour le mail, la relance rédigée et le brouillon de relance). Depuis le 15 septembre 2026, l'ANDPC impose l'authentification forte : l'étape 3, entre « S'identifier » et « Actions DPC », est reprise mot pour mot — « Saisissez le code de sécurité reçu par SMS sur votre téléphone mobile (authentification forte exigée par l'ANDPC depuis le 15 septembre 2026). » —, suivie du conseil de vérifier son numéro de mobile dans l'espace personnel agencedpc.fr. Pour modifier le parcours, changer seulement `lib/dpc-steps.ts`.
 - **Onglets « Texte » / « Aperçu »** : l'aperçu affiche le mail **tel qu'il sera reçu** (De, À, Objet, puis le HTML produit par la même fonction `renderMail` que l'envoi, avec l'apparence par défaut d'une messagerie). Un clic sur un lien de l'aperçu l'ouvre dans un nouvel onglet.
 - **Avertissements sur les liens** (`linkWarnings`, `lib/render-mail.ts`), non bloquants, aussi dans la fenêtre de relance : lien sans texte ou sans adresse, espace dans l'adresse, adresse ne commençant ni par `https://` ni par `www.`, parenthèse manquante, texte entre crochets sans adresse (« [Lien d'inscription] »), protocole mal écrit (`htps://`, `https:/`, `https//`), extension de site manquante (`www.agencedpc/…`).
@@ -224,7 +241,7 @@ Il envoie un `POST /api/auth/logout` (un simple lien GET ne peut pas déconnecte
 const SESSION_DURATION = 60 * 60 * 24 * 7 // 7 jours (JWT et maxAge du cookie)
 ```
 
-> Le JWT de session reste valide 7 jours, mais **l'accès d'un commercial est révocable** : passer sa fiche Airtable en « Plus actif » le bloque partout (génération, envoi, suivi), même avec une session valide, dans le délai décrit dans « Rôles et accès » (en pratique moins d'une minute). Un compte `@medere.fr` sans fiche garde, lui, l'accès en lecture au suivi jusqu'à l'expiration de sa session.
+> Le JWT de session reste valide 7 jours, mais **l'accès d'un commercial est révocable** : passer sa fiche Airtable en « Plus actif » le bloque partout (génération, envoi, suivi), même avec une session valide, dans le délai décrit dans « Rôles et accès » (en pratique moins d'une minute). Un compte `@medere.fr` sans fiche garde, lui, l'accès en lecture au suivi jusqu'à l'expiration de sa session. L'administrateur n'est jamais bloqué par sa fiche.
 
 ### Sécurité
 - Cookie `httpOnly` — inaccessible via JavaScript
@@ -234,9 +251,9 @@ const SESSION_DURATION = 60 * 60 * 24 * 7 // 7 jours (JWT et maxAge du cookie)
 - JWT signé — impossible à falsifier sans `NEXTAUTH_SECRET`
 - `NEXTAUTH_SECRET` absent → 500 explicite (log `[AUTH] NEXTAUTH_SECRET manquant`) au lieu d'une signature avec une clé vide
 
-### Couper l'accès à un commercial
-1. Airtable → table Commerciaux → passer son `Statut` à « Plus actif » : il est bloqué partout, même avec une session ouverte (message « Ton accès à l'Agent Mail a été désactivé »), dans le **délai maximal de révocation** ci-dessous.
-2. Désactiver son compte Google Workspace `@medere.fr` : il ne pourra plus se reconnecter.
+### Couper l'accès à un commercial (départ de Médéré)
+1. Airtable → table Commerciaux → passer son `Statut` à « Plus actif » : il est bloqué partout, même avec une session ouverte (message « Ton accès à l'Agent Mail a été désactivé »), dans le **délai maximal de révocation** ci-dessous. Ne s'applique pas à l'administrateur.
+2. Désactiver son compte Google Workspace `@medere.fr` : il ne pourra plus se reconnecter, ni à l'Agent Mail ni aux autres outils.
 
 Pour une coupure immédiate de **tous** les accès, changer `NEXTAUTH_SECRET` sur Vercel et redéployer : toutes les sessions deviennent invalides.
 
@@ -245,10 +262,13 @@ Le rôle est déterminé **côté serveur** à chaque requête, à partir de l'e
 
 | Rôle | Qui | Étape 1 | Générer / envoyer | Suivi |
 |---|---|---|---|---|
-| Administrateur | email dans `ADMIN_EMAILS` (`lib/config.ts`, actuellement `dethie@medere.fr`) | n'importe quel commercial actif (sa fiche par défaut) | au nom de n'importe quel commercial actif — **tracé** : `sent_by` / `sent_by_name` dans `email_track`, ligne « Envoyé par … pour le compte de … » dans la Note HubSpot | tout |
+| Administrateur | email `ADMIN_EMAIL` (profil complet dans les variables `ADMIN_*`, **indépendant d'Airtable** : accès complet que sa fiche existe, soit « Plus actif » ou ait été supprimée) | son nom par défaut (profil des variables, « (moi) ») ou n'importe quel commercial actif | en son nom (nom, email, owner HubSpot, Slack, téléphone des variables `ADMIN_*`), ou au nom de n'importe quel commercial actif — **tracé** : `sent_by` / `sent_by_name` dans `email_track`, ligne « Envoyé par … pour le compte de … » dans la Note HubSpot | tout ; relance n'importe quel mail |
 | Commercial | fiche « Actif » | sa fiche, présélectionnée et **verrouillée** | uniquement en son nom (un autre identifiant envoyé → 403 « Tu ne peux générer et envoyer des mails qu'en ton nom. ») | tout |
 | Lecteur | compte `@medere.fr` sans fiche | — (message « Ton compte n'est pas associé à une fiche commercial… ») | non (403) | lecture seule |
-| Désactivé | fiche « Plus actif » (administrateur compris) | — | non (403) | non (403) |
+| Désactivé | fiche « Plus actif » (personne partie de Médéré ; jamais l'administrateur) | — (message « Ton accès à l'Agent Mail a été désactivé ») | non (403) | non (403) |
+
+- **Profil administrateur** : aucun identifiant dans le code. Le profil n'apparaît jamais dans la liste des commerciaux vue par les autres utilisateurs (ni sa fiche Airtable, même active) ; à l'étape 1, l'administrateur voit « son nom (moi) » en tête de liste (identifiant réservé `admin:self`). Un mail qu'il a envoyé en son nom se relance en son nom, quel que soit l'état de sa fiche. Une variable `ADMIN_*` obligatoire manquante : rôle administrateur désactivé (l'email est alors traité comme n'importe quel compte, selon sa fiche).
+- **Mode de test du rôle** (développement local uniquement) : `DEV_FORCE_ROLE=commercial` (ou `lecteur`, `inactif`) dans `.env.local` fait passer **la session de l'administrateur** pour ce rôle, sans rien écrire dans Airtable (commercial : fiche fictive construite à partir du profil administrateur, identifiant `dev:commercial`). Actif seulement si `NODE_ENV=development` (`npm run dev`) **et** si `VERCEL` n'est pas défini ; `npm run build` / `next start` et Vercel l'ignorent, avec une erreur `[IDENTITE] DEV_FORCE_ROLE présent hors développement local` dans les journaux (aussi contrôlé au démarrage, `instrumentation.ts`). Quand il est actif : avertissement `[IDENTITE] MODE TEST` dans les journaux, aucun bandeau dans l'interface.
 
 - Fiches Commerciaux **en mémoire, jamais attendues** : chaque requête utilise la dernière version connue des fiches (mémoire de l'instance, sinon KV `cache:airtable:fiches:v1`, conservé après un redémarrage) ; dès qu'elle a plus de 60 secondes (`COMMERCIAL_CACHE_SECONDS`), elle est relue dans Airtable **en arrière-plan** (environ 1 s), sans faire attendre la requête. Sur un serveur qui tourne en continu, la relecture a aussi lieu chaque minute (`instrumentation.ts`).
 - **Délai maximal de révocation** (passage à « Plus actif », et de même pour un retour à « Actif » ou un changement d'email) :
@@ -257,7 +277,7 @@ Le rôle est déterminé **côté serveur** à chaque requête, à partir de l'e
   - **app inutilisée depuis plus de 60 secondes** (instance Vercel en sommeil) : la **première requête** qui suit est encore traitée avec l'ancienne fiche — c'est elle qui déclenche la relecture —, toutes les suivantes utilisent la fiche à jour. Une personne révoquée peut donc passer **une requête de plus** (un affichage, ou au pire un envoi) si personne n'a utilisé l'app dans la minute précédente.
   - Pour un blocage immédiat et certain (départ, compte compromis) : passer la fiche en « Plus actif » **et** changer `NEXTAUTH_SECRET` sur Vercel et redéployer (toutes les sessions sont invalidées, voir « Authentification »).
 - Plusieurs fiches avec le même email : la fiche « Actif » est retenue.
-- `GET /api/me` renvoie le rôle et la fiche de la personne connectée (403 si désactivée).
+- `GET /api/me` renvoie le rôle et la fiche de la personne connectée (403 si désactivée ; pour l'administrateur, la « fiche » est son profil, identifiant `admin:self`).
 - Routes métier protégées : `/api/generate`, `/api/send`, `/api/sessions`, `/api/contact-search` (administrateur et commercial) ; `/api/suivi`, `/api/formations`, `/api/commerciaux`, `/api/me` (lecteur compris).
 
 ### Limites de débit
@@ -311,12 +331,12 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 |----------------|-------|
 | `session_id` | Identifiant unique session |
 | `Numéro de session` | Affiché dans l'app |
-| `Date de début de session` | Filtre sessions futures |
-| `Date de fin de session` | Filtre e-learning en cours |
-| `Date 1ère soirée CV / Date Présentiel` | Affiché dans l'app |
-| `Date 2ème soirée CV` | Affiché dans l'app |
+| `Date de début de session` | Filtre sessions futures ; libellé e-learning (début) ; à défaut de date de soirée / présentiel |
+| `Date de fin de session` | Filtre e-learning en cours ; libellé e-learning (fin) |
+| `Date 1ère soirée CV / Date Présentiel` | Libellé des mails (classe virtuelle, présentiel) |
+| `Date 2ème soirée CV` | Libellé des mails (classe virtuelle) |
 | `Date limite d'inscription` | Disponible mais non affiché |
-| `Temps lisible (Webflow)` | Date affichée dans l'app |
+| `Temps lisible (Webflow)` | Affiché à l'étape 3 seulement (jamais dans les mails) |
 | `Numéro d'action DPC` | Champ lié → IDs des records Formation |
 | `webflow_id` | Filtre anti-doublon |
 | `Format` (formation) | Détection e-learning |
@@ -382,7 +402,7 @@ Rattachement : la relance est une entrée `email_track` de `kind: 'relance'` ave
 Au **premier clic humain** du PS (jamais pour un clic automatique), le commercial reçoit un DM « {PS} vient de cliquer dans ton mail … C'est le bon moment pour l'appeler. », **une seule fois par envoi** (`click_notified_at`). Il part après la confirmation du premier clic (3 secondes, voir « Ouvertures et clics automatiques »), en même temps que la Note HubSpot.
 
 ### Alertes techniques
-DM Slack à `ALERT_SLACK_USER_ID` (`lib/config.ts`, actuellement `U05UVHGBURX`) :
+DM Slack à l'administrateur (`ADMIN_SLACK_USER_ID`, `alertSlackUserId()` dans `lib/config.ts`) :
 - **erreurs du passage quotidien** du cron (un message récapitulatif, avec le détail de chaque erreur) ;
 - **Note HubSpot en échec définitif** : toute Note en échec (envoi, relance, ouverture, clic) est mise dans la file `hubspot_retry` (+ `hubspot_retry:{id}`, 7 jours) ; le cron la retente toutes les 6 heures (`HUBSPOT_RETRY_DELAY_HOURS`) ; après 4 essais au total (`HUBSPOT_RETRY_MAX_ATTEMPTS`), elle est abandonnée et l'alerte détaille le mail, le contact et les erreurs.
 
@@ -517,7 +537,7 @@ H=<hôte de la base KV de production>                                   # ex. xx
 # 1. Sauvegarde complète (backups/kv-export-<hôte>-<date>.json) — obligatoire : les étapes 2 et 3 la refusent si elle a plus d'une heure
 node scripts/migrate-kv.ts --host=$H --export
 
-# 2. Suppression des envois de test (PS = fiche de test 18421683158 ou dethie@medere.fr), faits au nom de vrais commerciaux
+# 2. Suppression des envois de test (PS = TEST_HUBSPOT_CONTACT_ID ou TEST_PS_EMAIL), faits au nom de vrais commerciaux
 node scripts/purge-test-sends.ts --host=$H                            #    rapport
 node scripts/purge-test-sends.ts --host=$H --apply                    #    suppression
 
@@ -530,7 +550,7 @@ node scripts/migrate-kv.ts --host=$H --verify
 
 # 5. Notes HubSpot « Email ouvert » / « Email cliqué » en double
 node scripts/dedupe-hubspot-notes.ts --host=$H                        #    rapport par contact (lire les cas ambigus)
-node scripts/dedupe-hubspot-notes.ts --host=$H --apply                #    archivage des doublons
+node scripts/dedupe-hubspot-notes.ts --host=$H --apply                #    sauvegarde (backups/notes-archivees-*.json) puis archivage
 
 # Retour arrière du KV si besoin (étapes 2 à 4) :
 node scripts/migrate-kv.ts --host=$H --restore=backups/<fichier>.json            # plan, aucune écriture
@@ -544,7 +564,7 @@ Avant l'étape 1 : ajouter `email.delivered`, `email.bounced` et `email.complain
 - Deux mails réellement envoyés en double (avant l'idempotence) restent **deux** entrées : aucun mail envoyé n'est supprimé ni fusionné.
 
 ### Envois de test — `scripts/purge-test-sends.ts`
-Supprime du KV les envois dont le PS est la fiche de test (`18421683158`) ou l'adresse de test (`dethie@medere.fr`), faits au nom de vrais commerciaux pendant les essais (constantes `TEST_CONTACT_IDS` / `TEST_EMAILS` en haut du script).
+Supprime du KV les envois dont le PS est le contact de test (`TEST_HUBSPOT_CONTACT_ID`) ou l'adresse de test (`TEST_PS_EMAIL`), faits au nom de vrais commerciaux pendant les essais. Les deux variables (environnement ou `.env.local`) sont obligatoires : le script refuse de tourner sans elles.
 - Supprimés pour chaque envoi : `email_track`, `email_body`, `email_clicks`, `send_result`, verrous `hubspot_note:*`, entrées de `emails_index`, `idx:commercial:*`, `idx:contact:*`, `relances_due` ; si l'envoi avait déjà été compté (entrée v2), sa contribution aux `stats:day:*` est retirée dans le même script atomique (`--verify` reste à 0 écart). Les anciennes clés `relance:*` du PS de test sont aussi supprimées.
 - **Jamais touchés** : les envois vers d'autres PS, les Notes HubSpot.
 - Garde-fous identiques à `migrate-kv.ts` : `--host` obligatoire, rapport par défaut, `--apply` pour écrire, refus sans export de moins d'une heure.
@@ -553,9 +573,13 @@ Supprime du KV les envois dont le PS est la fiche de test (`18421683158`) ou l'a
 Avant la phase 1, le webhook créait une Note « Email ouvert » / « Email cliqué » à chaque événement. Le script archive les doublons (à lancer après la migration) :
 ```bash
 node scripts/dedupe-hubspot-notes.ts --host=$H                 # rapport par contact, aucune modification (mode par défaut)
-node scripts/dedupe-hubspot-notes.ts --host=$H --apply         # archive les doublons
-# options : --contact=<id> (un seul contact), --subject-prefix=<texte> (sujets commençant par…)
+node scripts/dedupe-hubspot-notes.ts --host=$H --apply         # sauvegarde, puis archive les doublons
+node scripts/dedupe-hubspot-notes.ts --restore=backups/notes-archivees-<hôte>-<date>.json   # recrée les Notes archivées
+# options : --contact=<id> (un seul contact), --subject-prefix=<texte> (sujets commençant par…), --backup-dir=<dossier>
 ```
+- **Sauvegarde avant tout archivage** : chaque Note à archiver (identifiant, contact, contenu, date affichée `hs_timestamp`, date de création, propriétaire) est écrite dans `backups/notes-archivees-<hôte>-<date>.json`, relue et vérifiée **avant** le premier appel d'archivage ; chaque lot archivé y est marqué (`archived_at`). Fichier à garder hors du dépôt (données personnelles, `backups/` ignoré par git).
+- **Restauration** (`--restore=<fichier>`) : recrée chaque Note avec son contenu, sa date affichée, son propriétaire et son association au contact d'origine. HubSpot ne permet de reprendre ni l'identifiant ni la date de création (`hs_createdate`) : le nouvel identifiant est noté dans le fichier (`restored_id`). Relancer la commande après une interruption reprend sans doublon (Note déjà restaurée ou identique déjà présente : ignorée).
+- **Limites d'appels HubSpot** : au plus 8 requêtes par seconde, lots de 100, nouvel essai sur 429 (délai `Retry-After`, sinon croissant) et sur erreur 5xx / réseau pour les lectures et l'archivage. Interruption de l'archivage : relancer la même commande (les Notes déjà archivées ne sont plus des doublons ; les suivantes sont sauvegardées dans un nouveau fichier).
 - Contacts examinés : ceux présents dans le KV (contacts réellement écrits par l'agent). `.env.local` doit contenir `HUBSPOT_TOKEN` et les `KV_REST_API_*` de la base visée.
 - **Seules les Notes au format exact de l'agent** sont prises en compte (« 👁️ Email ouvert le… », « 🖱️ Email cliqué le… », ou « 🖱️ Lien cliqué le… » créé pendant les tests, suivies de « Sujet : » et « Commercial : »). Les Notes saisies à la main et les Notes « Email envoyé » ne sont jamais touchées.
 - Regroupement par contact, type, sujet et commercial. S'il existe **exactement un** mail correspondant dans le KV, la Note la plus ancienne est gardée et les autres sont archivées (corbeille HubSpot, récupérables 90 jours). Sinon (0 ou plusieurs mails avec ce sujet) : cas **ambigu**, rien n'est touché, signalé dans le rapport.

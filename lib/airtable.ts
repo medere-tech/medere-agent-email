@@ -291,18 +291,39 @@ export async function getSessionsByFormation(formationRecordId: string, formatio
       return new Date(dateDebut) >= today
       
     })
-    .map((r: any) => ({
-      id: r.id,
-      session_id: r.fields['session_id'] || '',
-      numero: r.fields['Numéro de session'] || '',
-      date_debut: r.fields['Date de début de session'] || '',
-      date_fin: r.fields['Date de fin de session'] || '',
-      date_cv1: r.fields["Date 1ère soirée CV / Date Présentiel"] || '',
-      date_cv2: r.fields['Date 2ème soirée CV'] || '',
-      date_limite: r.fields["Date limite d'inscription"] || '',
-      temps_lisible: r.fields['Temps lisible (Webflow)'] || '',
-      formation_id: formationRecordId,
-    }))
+    .map((r) => toSession(r, formationRecordId))
+}
+
+function toSession(r: { id: string; fields: Record<string, any> }, formationRecordId: string): Session {
+  return {
+    id: r.id,
+    session_id: r.fields['session_id'] || '',
+    numero: r.fields['Numéro de session'] || '',
+    date_debut: r.fields['Date de début de session'] || '',
+    date_fin: r.fields['Date de fin de session'] || '',
+    date_cv1: r.fields["Date 1ère soirée CV / Date Présentiel"] || '',
+    date_cv2: r.fields['Date 2ème soirée CV'] || '',
+    date_limite: r.fields["Date limite d'inscription"] || '',
+    temps_lisible: r.fields['Temps lisible (Webflow)'] || '',
+    formation_id: formationRecordId,
+  }
+}
+
+// Formation et sessions choisies, relues côté serveur (cache Airtable) pour la rédaction : les dates
+// présentées au PS ne viennent jamais du navigateur. Seules les sessions liées à la formation sont
+// retenues, dans l'ordre demandé. null si la formation n'est pas (ou plus) active.
+export async function getFormationAndSessions(
+  formationRecordId: string,
+  sessionIds: string[]
+): Promise<{ formation: Formation; sessions: Session[] } | null> {
+  const formation = (await getFormationsActives()).find((f) => f.id === formationRecordId)
+  if (!formation) return null
+  const all = await allSessionsCached()
+  const sessions = sessionIds
+    .map((id) => all.find((r) => r.id === id))
+    .filter((r): r is { id: string; fields: Record<string, any> } => !!r && (r.fields["Numéro d'action DPC"] || []).includes(formationRecordId))
+    .map((r) => toSession(r, formationRecordId))
+  return { formation, sessions }
 }
 
 // Formations déjà suivies par un PS (record IDs), pour ne pas les lui proposer en fin de mail.
