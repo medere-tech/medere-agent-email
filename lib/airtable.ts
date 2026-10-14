@@ -1,6 +1,8 @@
 import { AIRTABLE_CACHE_SECONDS, COMMERCIAL_CACHE_SECONDS } from '@/lib/config'
 import { getKv, kvConfigured } from '@/lib/kv'
 import type { Fiche } from '@/lib/roles'
+import { sessionOuverte } from '@/lib/session-label'
+import { today as todayParis } from '@/lib/dev-today'
 
 const BASE_ID = process.env.AIRTABLE_BASE_ID!
 const TOKEN = process.env.AIRTABLE_TOKEN!
@@ -143,7 +145,7 @@ const CATALOGUE_KEY = 'catalogue:v1'
 // Toutes les sessions (champs utiles seulement), triées par date de début
 const SESSION_FIELDS = [
   'session_id', 'Numéro de session', 'Date de début de session', 'Date de fin de session',
-  'Date 1ère soirée CV / Date Présentiel', 'Date 2ème soirée CV', "Date limite d'inscription",
+  'Date 1ère soirée CV / Date Présentiel', 'Date 2ème soirée CV',
   'Temps lisible (Webflow)', "Numéro d'action DPC", 'webflow_id',
 ]
 
@@ -175,7 +177,8 @@ export interface Session {
   date_fin: string
   date_cv1: string
   date_cv2: string
-  date_limite: string
+  // Absent : doublon de session, jamais proposé
+  webflow_id: string
   temps_lisible: string
   formation_id: string
 }
@@ -257,40 +260,18 @@ async function loadFormationsActives(): Promise<Formation[]> {
 }
 
 export async function getSessionsByFormation(formationRecordId: string, formationFormat: string = ''): Promise<Session[]> {
-  // Toute la table Sessions (en cache), filtrée ici : dans une formule Airtable, ARRAYJOIN d'un
-  // champ lié renvoie le champ principal (pas l'ID du record), FIND("recXXX", …) ne trouve rien.
-  const allRecords = await allSessionsCached()
+  // Sessions ouvertes à l'inscription : règle unique sessionOuverte (lib/session-label), aussi
+  // appliquée à la relance. Date du jour à Paris (DEV_TODAY en développement local).
+  const today = todayParis()
+  return (await getFormationSessions(formationRecordId)).filter((s) => sessionOuverte(s, formationFormat, today))
+}
 
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-
-  return allRecords
-    .filter((r: any) => {
-      // The linked field returns an array of record IDs in the API response
-      const linkedFormations: string[] = r.fields["Numéro d'action DPC"] || []
-      if (!linkedFormations.includes(formationRecordId)) return false
-
-      // Exclure les sessions sans webflow_id (doublons)
-      if (!r.fields['webflow_id']) return false
-
-      // Filter future sessions only (skip if no date)
-      const dateDebut = r.fields['Date de début de session']
-      const dateFin = r.fields['Date de fin de session']
-      const isElearning = formationFormat.toLowerCase().includes('e-learning')
-
-      if (!dateDebut) return true
-
-      if (isElearning) {
-      // E-learning : inclure les sessions en cours (commencées mais pas encore terminées)
-      // Exclure uniquement si la date de fin est dépassée
-      if (dateFin && new Date(dateFin) < today) return false
-      return true
-      }
-
-      // Autres formats : uniquement les sessions futures
-      return new Date(dateDebut) >= today
-      
-    })
+// Toutes les sessions d'une formation, passées comprises, triées par date de début. Toute la table
+// Sessions (en cache) est filtrée ici : dans une formule Airtable, ARRAYJOIN d'un champ lié renvoie
+// le champ principal (pas l'ID du record), FIND("recXXX", …) ne trouve rien.
+export async function getFormationSessions(formationRecordId: string): Promise<Session[]> {
+  return (await allSessionsCached())
+    .filter((r) => ((r.fields["Numéro d'action DPC"] || []) as string[]).includes(formationRecordId))
     .map((r) => toSession(r, formationRecordId))
 }
 
@@ -303,7 +284,7 @@ function toSession(r: { id: string; fields: Record<string, any> }, formationReco
     date_fin: r.fields['Date de fin de session'] || '',
     date_cv1: r.fields["Date 1ère soirée CV / Date Présentiel"] || '',
     date_cv2: r.fields['Date 2ème soirée CV'] || '',
-    date_limite: r.fields["Date limite d'inscription"] || '',
+    webflow_id: r.fields['webflow_id'] || '',
     temps_lisible: r.fields['Temps lisible (Webflow)'] || '',
     formation_id: formationRecordId,
   }

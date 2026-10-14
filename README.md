@@ -160,7 +160,7 @@ medere-agent-email/
 
 > Une variable `ADMIN_*` obligatoire manquante désactive le rôle administrateur (avertissement `[CONFIG] Rôle administrateur désactivé` dans les journaux) sans arrêter l'app ; les alertes techniques ne partent plus (journalisées seulement).
 >
-> **Développement local uniquement** : `DEV_FORCE_ROLE` (voir « Rôles et accès ») et les `TEST_*` des scripts (`docs/TESTS.md`). Ne jamais les créer sur Vercel : `DEV_FORCE_ROLE` y serait ignorée et une erreur journalisée.
+> **Développement local uniquement** : `DEV_FORCE_ROLE` (voir « Rôles et accès »), `DEV_TODAY` (voir « Filtres sessions ») et les `TEST_*` des scripts (`docs/TESTS.md`). Ne jamais les créer sur Vercel : `DEV_FORCE_ROLE` et `DEV_TODAY` y seraient ignorées et une erreur journalisée.
 
 > `NEXTAUTH_SECRET` et `NEXTAUTH_URL` gardent ce nom historique, mais l'app n'utilise pas la librairie next-auth.
 
@@ -309,10 +309,14 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 
 ### Filtres sessions (`getSessionsByFormation`)
 
-- Liée à la formation via `Numéro d'action DPC`
-- `webflow_id` présent (évite les sessions en doublon)
-- Date future **sauf e-learning** : les sessions dont la date de début est passée mais la date de fin est future sont incluses
-- Pagination complète (toutes les pages Airtable chargées)
+Règle unique `sessionOuverte` (`lib/session-label.ts`), appliquée à l'étape 3 **et** à la relance. Date du jour : fuseau Europe/Paris.
+- liée à la formation via `Numéro d'action DPC` ;
+- `webflow_id` présent (évite les sessions en doublon) ;
+- **classe virtuelle et présentiel** : on ne peut pas s'inscrire le jour même. La plus ancienne des dates `Date de début de session` et `Date 1ère soirée CV / Date Présentiel` doit être **strictement postérieure** à aujourd'hui (une session qui commence aujourd'hui n'est plus proposée) ; une session sans aucune de ces dates n'est pas proposée ;
+- **e-learning** (format contenant « e-learning ») : règle inchangée. Proposée tant que sa `Date de fin de session` n'est pas dépassée, même commencée ; sans date de début : proposée ;
+- **autres formats** (« Hybride ») : règle inchangée. Date de début aujourd'hui ou plus tard ; sans date de début : proposée.
+
+Simulation de la date du jour (**développement local uniquement**) : `DEV_TODAY=AAAA-MM-JJ` dans `.env.local` (`lib/dev-today.ts`). Mêmes garde-fous que `DEV_FORCE_ROLE` : active seulement si `NODE_ENV=development` (`npm run dev`) **et** si `VERCEL` n'est pas défini ; `npm run build` / `next start` et Vercel l'ignorent, avec l'erreur `[CONFIG] DEV_TODAY présent hors développement local` dans les journaux (aussi contrôlé au démarrage, `instrumentation.ts`). Quand elle est active : avertissement `[CONFIG] MODE TEST (développement local) : date du jour simulée au …`. Elle s'applique à l'étape 3, à la relance et au contrôle des dates (`/api/me` et `/api/relance` renvoient `aujourdhui`).
 
 ### Cache et pagination
 - Toute requête **paginée** passe par `atAll()` et n'utilise **jamais** le cache HTTP de Next (`cache: 'no-store'`), première page comprise. Une page 1 servie depuis ce cache porterait un `offset` expiré et provoquerait `422 LIST_RECORDS_ITERATOR_NOT_AVAILABLE`.
@@ -331,11 +335,10 @@ export const FORMATIONS_REQUIRE_FUTURE_SESSION = false
 |----------------|-------|
 | `session_id` | Identifiant unique session |
 | `Numéro de session` | Affiché dans l'app |
-| `Date de début de session` | Filtre sessions futures ; libellé e-learning (début) ; à défaut de date de soirée / présentiel |
-| `Date de fin de session` | Filtre e-learning en cours ; libellé e-learning (fin) |
-| `Date 1ère soirée CV / Date Présentiel` | Libellé des mails (classe virtuelle, présentiel) |
+| `Date de début de session` | Ouverture (classe virtuelle et présentiel : premier jour = plus ancienne des dates de début et de 1ère soirée / présentiel ; autres formats : date de début) ; libellé e-learning (début) ; à défaut de date de soirée / présentiel |
+| `Date de fin de session` | Ouverture e-learning ; libellé e-learning (fin) |
+| `Date 1ère soirée CV / Date Présentiel` | Ouverture (classe virtuelle, présentiel) ; libellé des mails (classe virtuelle, présentiel) |
 | `Date 2ème soirée CV` | Libellé des mails (classe virtuelle) |
-| `Date limite d'inscription` | Disponible mais non affiché |
 | `Temps lisible (Webflow)` | Affiché à l'étape 3 seulement (jamais dans les mails) |
 | `Numéro d'action DPC` | Champ lié → IDs des records Formation |
 | `webflow_id` | Filtre anti-doublon |
@@ -370,14 +373,25 @@ Une seule fonction, `renderMail` (`lib/render-mail.ts`, sans dépendance), produ
 ### Relance par mail depuis /suivi
 Dans le détail d'un mail, bouton **« Relancer »** (ou lien « Préparer la relance par mail » du DM J+3, qui ouvre `/suivi?relance={resend_id}`). La fenêtre de relance propose :
 - objet `Relance : votre formation {nom de la formation}` ;
-- texte pré-rempli **identique quel que soit le statut du mail d'origine** : formule d'appel (« Bonjour {titre} {nom}, »), introduction neutre (« Je me permets de revenir vers vous concernant la formation … »), prochaines sessions de la formation (cache Airtable, au plus 3), les 7 étapes d'inscription à jour avec le conseil sur le numéro de mobile, puis la signature (nom, email, téléphone de la fiche). **Le mail d'origine n'est pas recopié** (il peut contenir l'ancien parcours en 6 étapes) : la relance se suffit à elle-même ;
+- texte pré-rempli **identique quel que soit le statut du mail d'origine** : formule d'appel (« Bonjour {titre} {nom}, »), introduction neutre (« Je me permets de revenir vers vous concernant la formation … »), sessions encore ouvertes (voir « Sessions proposées dans la relance »), les 7 étapes d'inscription à jour avec le conseil sur le numéro de mobile, puis la signature (nom, email, téléphone de la fiche). **Le mail d'origine n'est pas recopié** (il peut contenir l'ancien parcours en 6 étapes) : la relance se suffit à elle-même ;
 - **RGPD** : aucun texte destiné à un PS (mail, relance rédigée, brouillon) ne mentionne ni ne laisse deviner le suivi des ouvertures et des clics. Le statut (non ouvert, ouvert sans clic, cliqué) n'est visible que du commercial (`/suivi`, DM Slack, Notes HubSpot) et **n'est jamais transmis au prompt** ; les prompts du mail et de la relance contiennent la consigne `NO_TRACKING_RULE` (`lib/dpc-steps.ts`) ;
 - tout est modifiable ; **« Rédiger la relance »** fait rédiger une relance sur le même modèle (introduction neutre, sessions, numéro DPC, 7 étapes, signature ; même limite de débit que la génération), **une seule fois par mail d'origine** : le bouton disparaît ensuite (« Rédigée · modifiable à la main »), le texte reste modifiable à la main ;
 - un brouillon rédigé enregistré avant ce changement (sans `v: 2`) est ignoré : la relance est rédigée de nouveau au format neutre.
 
+#### Sessions proposées dans la relance
+À chaque préparation, rédaction et envoi, le serveur relit les sessions de la formation (cache Airtable, 5 minutes au plus) et ne garde que celles encore ouvertes (`sessionOuverte`, même règle que l'étape 3) — `relanceSessions` dans `lib/relance.ts` :
+- **sessions du mail d'origine** : enregistrées à l'envoi dans `email_track` (`session_ids`, `session_numeros`, relues côté serveur à partir des sessions choisies à l'étape 3) ; pour un mail envoyé avant cet enregistrement, retrouvées dans le texte du mail relu chez Resend (`GET /emails/{id}`, numéros de session de la formation ; le texte n'est jamais stocké, seuls les numéros trouvés sont gardés 10 minutes en mémoire) ;
+- au moins une session d'origine encore ouverte → **uniquement celles-là** ;
+- toutes passées → les **3 prochaines sessions ouvertes** de la formation, de la plus proche à la plus lointaine ; la fenêtre l'indique : « Les sessions du premier mail sont passées : la relance propose les prochaines sessions disponibles. » ;
+- sessions d'origine introuvables → mêmes 3 prochaines sessions, avec « Les sessions du premier mail n'ont pas pu être retrouvées : la relance propose les prochaines sessions disponibles. » ;
+- **aucune session ouverte** (ou formation plus active) → rédaction et envoi désactivés : « Aucune session à venir pour cette formation : relance impossible pour le moment. » ; le bouton « Relancer » de `/suivi` est désactivé avec ce message.
+
+Contrôle des dates : à l'étape 5 et dans la fenêtre de relance, les jours de la semaine incohérents **et les dates de session déjà passées** sont signalés (avertissement non bloquant, `checkDates`). Une date est une date de session si elle porte un jour de la semaine ou si sa ligne mentionne une session (la date du premier mail dans l'introduction n'est pas signalée) ; le début d'une période « du … au … » est ignoré (e-learning en cours). **À l'envoi de la relance**, le serveur refuse (409) un texte qui cite le numéro d'une session de la formation qui n'est plus ouverte (« La session 26.010 n'est plus ouverte à l'inscription : retire-la du texte de la relance. »).
+
 Rédaction unique, contrôlée côté serveur (`/api/relance/generate`) :
 - à la première rédaction, le texte de Claude est enregistré dans `relance_draft:{resend_id}` (supprimé avec l'envoi par la purge RGPD) ;
-- tout appel suivant pour ce mail — rechargement, autre onglet, administrateur, appel direct — renvoie ce brouillon **sans appeler Claude** (`dejaRedigee: true`, journal « Brouillon déjà rédigé renvoyé, sans appel à Claude ») ; `GET /api/relance` pré-remplit la fenêtre avec ce texte (`redigee: true`) ;
+- le brouillon enregistre aussi les numéros des sessions proposées (`sessions`) ; s'ils ne correspondent plus aux sessions proposées ce jour (brouillons plus anciens : numéros relus dans le texte), le brouillon est **ignoré et rédigé de nouveau** (un seul appel à Claude, même verrou) ;
+- sinon, tout appel suivant pour ce mail — rechargement, autre onglet, administrateur, appel direct — renvoie ce brouillon **sans appeler Claude** (`dejaRedigee: true`, journal « Brouillon déjà rédigé renvoyé, sans appel à Claude ») ; `GET /api/relance` pré-remplit la fenêtre avec ce texte (`redigee: true`) ;
 - verrou atomique `relance_gen_lock:{resend_id}` (SET NX, 180 s) : deux demandes simultanées ne font **qu'un appel à Claude**, la seconde attend le brouillon de la première ;
 - si Claude échoue, le verrou est libéré (script `RELEASE_LOCK_SCRIPT`, seulement par son propriétaire) et rien n'est enregistré : un nouvel essai est possible.
 
@@ -394,6 +408,7 @@ Rattachement : la relance est une entrée `email_track` de `kind: 'relance'` ave
 À chaque envoi initial, la relance est planifiée dans `relances_due` (score = jour d'échéance J+3, heure de Paris, à 00:00 UTC). Le cron (`/api/cron/relance`, 8h UTC) traite **toutes** les relances dont l'échéance est passée — y compris les jours manqués (**rattrapage**). Chaque relance est « réclamée » par `ZREM` : deux passages simultanés n'envoient jamais deux DM.
 - **Pas de DM** si : une relance mail est déjà partie, adresse invalide, signalé comme indésirable, ou PS **inscrit** à une session de la formation (Airtable : par RPPS, sinon RPPS retrouvé par l'email dans Clients). Airtable indisponible : le DM part quand même et l'erreur est remontée dans l'alerte.
 - Le DM indique le **statut** (non ouvert / ouvert sans clic / cliqué) et contient le lien **« Préparer la relance par mail »** vers `/suivi?relance={resend_id}`, plus la fiche HubSpot. `slack_relance_at` est posé sur l'envoi.
+- Formation sans plus aucune session ouverte (même règle que l'étape 3, ou formation plus active) : le DM part quand même, avec la ligne « Plus aucune session à venir pour cette formation : propose une autre formation par téléphone. » (rien n'est ajouté si Airtable est indisponible).
 - Slack en échec : nouvel essai au passage suivant, jusqu'à 3 fois (`SLACK_RELANCE_MAX_ATTEMPTS`, compteur `slack_relance_attempts:{membre}`).
 - Commercial sans `slack_user_id` : pas de DM, erreur remontée dans l'alerte.
 - Anciennes clés `relance:{timestamp}` non rattachées (`legacy:relance:…` dans `relances_due`, voir la migration) : DM sans statut, avec un lien vers `/suivi`, puis la clé est supprimée.

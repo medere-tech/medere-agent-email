@@ -4,7 +4,7 @@ import { getKv, kvConfigured } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 import { markOnce, purgeExpired } from '@/lib/tracking'
 import { RETENTION_DAYS, SLACK_RELANCE_MAX_ATTEMPTS } from '@/lib/config'
-import { RELANCE_STATUS_LABEL, relanceStatus } from '@/lib/relance'
+import { RELANCE_STATUS_LABEL, formationOuverte, relanceStatus } from '@/lib/relance'
 import { processNoteRetries } from '@/lib/note-queue'
 import { appUrl, hubspotContactUrl, sendAlert, sendSlackDM } from '@/lib/slack'
 
@@ -95,6 +95,14 @@ async function processDueRelances(report: Report) {
   }
 }
 
+// Formation sans aucune session encore ouverte (règle de l'étape 3) : le DM part quand même, avec
+// cette ligne. Sessions inconnues (Airtable indisponible) : rien n'est ajouté.
+const SANS_SESSION = 'Plus aucune session à venir pour cette formation : propose une autre formation par téléphone.'
+
+async function sansSessionLine(numero: string): Promise<string> {
+  return (await formationOuverte(numero)) === false ? `⚠️ ${SANS_SESSION}\n` : ''
+}
+
 function frenchDate(iso: string): string {
   try {
     return new Intl.DateTimeFormat('fr-FR', { day: 'numeric', month: 'long', timeZone: 'Europe/Paris' }).format(new Date(iso))
@@ -149,6 +157,7 @@ async function handleEntry(id: string, report: Report) {
   const text = `*📬 Relance à faire : ${entry.ps_nom}*\n` +
     `Tu lui as envoyé un mail le ${frenchDate(entry.sent_at)} pour la formation *« ${entry.formation_nom} »*.\n` +
     `Statut : *${RELANCE_STATUS_LABEL[statut]}*. ${constat} Il ne s'est pas encore inscrit.\n` +
+    (await sansSessionLine(entry.formation_numero)) +
     `👉 <${appUrl()}/suivi?relance=${encodeURIComponent(id)}|Préparer la relance par mail>\n` +
     (entry.contact_id ? `👉 Fiche HubSpot : ${hubspotContactUrl(entry.contact_id)}` : '')
   try {
@@ -178,6 +187,7 @@ async function handleLegacy(member: string, report: Report) {
   }
   const text = `*📬 Relance à faire : ${item.ps_nom}*\n` +
     `Tu lui as envoyé un mail le ${frenchDate(item.sent_at)} pour la formation *« ${item.formation_nom} »*. Il ne s'est pas encore inscrit.\n` +
+    (await sansSessionLine(item.formation_numero)) +
     `👉 <${appUrl()}/suivi|Voir le suivi des envois>\n` +
     (item.ps_hubspot_id ? `👉 Fiche HubSpot : ${hubspotContactUrl(item.ps_hubspot_id)}` : '')
   try {

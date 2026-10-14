@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getKv, kvConfigured } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 import { requireActor } from '@/lib/identity'
-import { relanceVerdict } from '@/lib/relance'
+import { formationOuverte, relanceVerdict } from '@/lib/relance'
+import { RELANCE_MESSAGES } from '@/lib/session-label'
 import { TRACKING_RELIABLE_SINCE } from '@/lib/config'
 import { isMigrated } from '@/lib/tracking'
 import { SUIVI_PAGE_SIZE, actorKey, countersFor, needsEntries, parseFilters, runLegacyQuery, runQuery, type SuiviStats } from '@/lib/suivi-query'
@@ -64,11 +65,18 @@ export async function POST(req: NextRequest) {
       commerciauxMap = Object.fromEntries(r.commerciaux.map((c) => [c.key, c.name]))
     }
 
+    // Relance possible : formation avec au moins une session encore ouverte (une lecture du cache
+    // Airtable par formation de la page ; inconnu en cas d'erreur → pas de blocage ici, l'envoi recontrôle)
+    const verdicts = result.ids.map((_, i) => (result.entries[i] ? relanceVerdict(actor, result.entries[i]) : null))
+    const numeros = Array.from(new Set(result.entries.filter((e, i) => e && verdicts[i]?.ok).map((e) => String(e!.formation_numero || ''))))
+    const ouvertes = new Map(await Promise.all(numeros.map(async (n) => [n, await formationOuverte(n)] as const)))
+
     const emails = result.ids.map((id, i) => {
       const e = result.entries[i]
       if (!e) return null
       const child = e.relance_id ? result.children[e.relance_id] : null
-      const verdict = relanceVerdict(actor, e)
+      const sansSession = verdicts[i]?.ok && ouvertes.get(String(e.formation_numero || '')) === false
+      const verdict = sansSession ? { ok: false as const, status: 409, error: RELANCE_MESSAGES.aucune! } : verdicts[i]!
       return {
         resend_id: id,
         ...e,

@@ -1,14 +1,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActor } from '@/lib/identity'
 import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
-import { checkRelance, originalMessageId } from '@/lib/relance'
+import { checkRelance, originalMessageId, relanceSessions, sessionsFermeesCitees, sessionsFermeesMessage } from '@/lib/relance'
 import { deliverMail, validIdempotencyKey } from '@/lib/deliver'
 import { attachRelance } from '@/lib/tracking'
 import { getKv } from '@/lib/kv'
 import { KEYS } from '@/lib/kv-schema'
 
 // Envoi de la relance : envoi complet (suivi, copie, Note HubSpot), dans le fil du mail d'origine
-// (In-Reply-To / References), rattaché au mail d'origine, une seule fois par mail.
+// (In-Reply-To / References), rattaché au mail d'origine, une seule fois par mail. Sessions relues
+// dans Airtable : refus si la formation n'a plus de session ouverte, ou si le texte cite le numéro
+// d'une session qui n'est plus ouverte à l'inscription (une date passée écrite sans numéro n'est
+// signalée que dans la fenêtre de relance, sans blocage).
 export async function POST(req: NextRequest) {
   const guard = await requireActor()
   if (!guard.ok) return guard.response
@@ -37,6 +40,15 @@ export async function POST(req: NextRequest) {
 
     const check = await checkRelance(actor, id)
     if (!check.ok) return NextResponse.json({ error: check.error }, { status: check.status })
+
+    const rs = await relanceSessions(id, check.entry)
+    if (rs.mode === 'aucune') return NextResponse.json({ error: rs.message }, { status: 409 })
+    const fermees = sessionsFermeesCitees(`${sujet}
+${corps}`, rs)
+    if (fermees.length) {
+      console.warn('[RELANCE] Envoi refusé, session(s) fermée(s) citée(s) :', id, fermees.join(', '))
+      return NextResponse.json({ error: sessionsFermeesMessage(fermees) }, { status: 409 })
+    }
 
     const limit = await checkRateLimit('send', actor.email)
     if (!limit.ok) return NextResponse.json({ error: rateLimitMessage('send', limit.retryAfterSeconds) }, { status: 429 })

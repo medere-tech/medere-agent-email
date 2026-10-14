@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { linkWarnings } from '@/lib/render-mail'
-import { checkWeekdays } from '@/lib/session-label'
+import { checkDates } from '@/lib/session-label'
 
 // Fenêtre de relance d'un mail (ouverte depuis /suivi ou depuis le lien du DM Slack J+3) :
 // objet et texte pré-remplis, modifiables, rédigés une seule fois par Claude (le bouton disparaît
 // ensuite, le texte reste modifiable à la main), puis envoi dans le fil du
-// mail d'origine. Le serveur refait tous les contrôles (auteur, une seule relance, statut).
+// mail d'origine. Le serveur refait tous les contrôles (auteur, une seule relance, statut, sessions
+// encore ouvertes) ; il indique les sessions retenues (message) ou l'absence de session (relance
+// impossible : rédaction et envoi désactivés).
 
 interface Draft {
   id: string
@@ -15,6 +17,11 @@ interface Draft {
   corps: string
   statut: string
   redigee: boolean
+  // Sessions relues dans Airtable : origine, remplacement, inconnues ou aucune (relance impossible)
+  mode: 'origine' | 'remplacement' | 'inconnues' | 'aucune'
+  message: string | null
+  possible: boolean
+  aujourdhui: string
   ps: { nom: string; email: string }
   formation: string
   envoyeLe: string
@@ -79,9 +86,11 @@ export default function RelancePanel({ id, onClose, onSent }: { id: string; onCl
   const sendingRef = useRef(false)
   // Liens mal formés (même contrôle que l'étape 5 de l'envoi), non bloquant
   const warnings = useMemo(() => linkWarnings(corps), [corps])
-  // Jours de la semaine contrôlés sur le texte de la relance (et à chaque modification)
-  const dateWarnings = useMemo(() => (generating ? [] : checkWeekdays(`${sujet}
-${corps}`)), [sujet, corps, generating])
+  // Jours de la semaine et dates de session déjà passées, contrôlés sur le texte de la relance
+  // (et à chaque modification), avec la date du jour du serveur
+  const dateWarnings = useMemo(() => (generating ? [] : checkDates(`${sujet}
+${corps}`, draft?.aujourdhui)), [sujet, corps, generating, draft?.aujourdhui])
+  const possible = draft?.possible !== false
   // Clé d'idempotence de cette relance : un double clic ou un renvoi n'envoie qu'une relance
   const keyRef = useRef(typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : String(Date.now()))
 
@@ -164,6 +173,11 @@ ${corps}`)), [sujet, corps, generating])
 
           {draft && !sent && (
             <>
+              {draft.message && (
+                <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${possible ? 'bg-zinc-50 border border-zinc-200 text-zinc-700' : 'bg-white border border-zinc-900 text-zinc-900'}`} data-alerte="sessions">
+                  <Icon.Warning /><span>{draft.message}</span>
+                </div>
+              )}
               {draft.auNomDe && (
                 <p className="text-xs text-zinc-500">La relance part au nom de {draft.auNomDe} ; tu seras indiqué comme expéditeur dans la Note HubSpot.</p>
               )}
@@ -179,7 +193,7 @@ ${corps}`)), [sujet, corps, generating])
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <label className="text-xs font-medium text-zinc-500">Texte de la relance</label>
-                  {redigee ? (
+                  {!possible ? null : redigee ? (
                     <span className="text-xs text-zinc-400">Rédigée · modifiable à la main</span>
                   ) : (
                     <button
@@ -236,7 +250,7 @@ ${corps}`)), [sujet, corps, generating])
                 <button onClick={onClose} className="px-4 py-2.5 border border-zinc-200 text-sm font-medium rounded-lg hover:bg-zinc-50">Annuler</button>
                 <button
                   onClick={send}
-                  disabled={sending || generating || !sujet.trim() || !corps.trim()}
+                  disabled={!possible || sending || generating || !sujet.trim() || !corps.trim()}
                   className="flex items-center gap-2 px-4 py-2.5 bg-zinc-900 text-white text-sm font-medium rounded-lg hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {sending ? <><Icon.Loader /> Envoi en cours...</> : <><Icon.Send /> Envoyer la relance</>}

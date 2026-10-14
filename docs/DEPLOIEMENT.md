@@ -267,3 +267,42 @@ Garder le fichier de sauvegarde hors du dépôt (données personnelles) tant qu'
 
 ### 7.6 Retour arrière
 Vercel → **Deployments** → déploiement précédent → **Instant Rollback**. Aucune donnée à restaurer. Les variables `ADMIN_*` peuvent rester (l'ancien code les ignore) ; avec l'ancien code, ton accès redevient bloqué tant que ta fiche est « Plus actif ».
+
+---
+
+## 8. Chantier « fix/relance-sessions » (octobre 2026)
+
+La relance ne propose plus que des sessions encore ouvertes à l'inscription, avec la même règle que l'étape 3 de l'assistant. Cette règle unique change aussi l'étape 3 pour les classes virtuelles et présentiels (voir 8.2). Le DM Slack de J+3 signale les formations qui n'ont plus aucune session à venir.
+
+### 8.1 Migration de données : aucune
+- Aucune clé KV à transformer, aucun script à lancer, rien à modifier dans Airtable.
+- Les nouveaux envois enregistrent leurs sessions (`session_ids`, `session_numeros` dans `email_track`). Pour les mails envoyés **avant** la mise en ligne, la relance retrouve les sessions dans le texte du mail relu chez Resend (numéros de session de la formation). Si Resend ne le fournit plus, la relance propose les 3 prochaines sessions ouvertes avec le message « Les sessions du premier mail n'ont pas pu être retrouvées… ».
+- Brouillons de relance déjà rédigés : conservés. Celui dont les sessions ne sont plus celles du jour est ignoré et rédigé de nouveau à la prochaine demande (un appel à Claude par mail concerné). Les autres sont réutilisés tels quels.
+
+### 8.2 Changement visible à l'étape 3 (à vérifier avant la mise en ligne)
+Règle d'ouverture (`sessionOuverte`, `lib/session-label.ts`), seule nouveauté pour les **classes virtuelles et présentiels** : la session n'est proposée que si la plus ancienne des dates « Date de début de session » et « Date 1ère soirée CV / Date Présentiel » est **après** aujourd'hui (Paris). Une session qui commence aujourd'hui, ou sans aucune de ces dates, n'est plus proposée. **E-learning et autres formats (« Hybride ») : aucun changement.** `webflow_id` et rattachement à la formation : inchangés.
+
+Comparaison faite le 13 octobre 2026 sur les données Airtable du jour (code de `main` contre nouveau code) : 214 sessions visibles avant, 212 après. Seules disparaissent les deux classes virtuelles qui commencent ce jour-là : « Les bruxismes… (Classe virtuelle) » 26.008 et « L'IA en santé pour les médecins (Classe virtuelle) » 26.010. Aucune session n'apparaît, aucun e-learning ne disparaît.
+
+### 8.3 Variables Vercel
+Aucune nouvelle variable. **Ne jamais créer `DEV_TODAY` sur Vercel** (simulation de la date du jour, développement local uniquement). Elle y serait ignorée, avec une erreur dans les journaux.
+
+### 8.4 Mise en ligne
+1. Fusionner la branche dans `main` (Vercel déploie automatiquement), puis attendre « Ready ».
+2. Vercel → **Logs** : aucune ligne `[CONFIG] DEV_TODAY présent hors développement local`.
+3. Au prochain passage du cron (8h UTC) : les DM de J+3 d'une formation sans session à venir contiennent la ligne « Plus aucune session à venir pour cette formation : propose une autre formation par téléphone. ».
+
+### 8.5 Tests de fumée (ton contact de test uniquement)
+| # | Action | Attendu |
+|---|---|---|
+| 1 | Étape 3, « L'IA en santé pour les médecins (Classe virtuelle) » ; puis une formation e-learning | Classe virtuelle : aucune session qui commence aujourd'hui ou avant. E-learning : mêmes sessions qu'avant la mise en ligne (sessions en cours comprises) |
+| 2 | Envoyer un mail `[TEST-…]` à ton contact de test avec une ou deux sessions | `/suivi` : envoi présent (les sessions sont enregistrées dans le suivi) |
+| 3 | `/suivi` → « Relancer » sur ce mail | Uniquement les sessions du mail d'origine ; aucun message au-dessus de l'objet |
+| 4 | Dans le texte, ajouter la ligne « Session 26.010 : mardi 13 et jeudi 15 octobre 2026 » (session passée) | Avertissement « cette date est déjà passée » ; « Envoyer la relance » refusé : « La session 26.010 n'est plus ouverte à l'inscription… ». Retirer la ligne |
+| 5 | Envoyer la relance `[TEST-…]` | Envoyée dans le fil du mail d'origine |
+| 6 | `/suivi` → un ancien mail d'une formation sans session à venir (s'il en existe) | « Relancer » désactivé : « Aucune session à venir pour cette formation : relance impossible pour le moment. » |
+
+Ensuite, archiver les Notes `[TEST-…]` créées sur ton contact de test.
+
+### 8.6 Retour arrière
+Vercel → **Deployments** → déploiement précédent → **Instant Rollback**. Aucune donnée à restaurer. Les champs `session_ids` et `session_numeros` des envois et `sessions` des brouillons sont ignorés par l'ancien code.
