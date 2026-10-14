@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireActor, senderFor } from '@/lib/identity'
 import { checkRateLimit, rateLimitMessage } from '@/lib/ratelimit'
 import { deliverMail } from '@/lib/deliver'
+import { getFormationAndSessions } from '@/lib/airtable'
 
 interface SendPayload {
   // Fiche Airtable du commercial choisi à l'étape 1 : seul un administrateur peut en désigner
@@ -16,9 +17,12 @@ interface SendPayload {
     rpps?: string
   }
   formation: {
+    id?: string         // record Airtable de la formation
     nom: string
     numero: string
   }
+  // Sessions choisies à l'étape 3 (records Airtable), enregistrées dans le suivi pour la relance
+  session_ids?: string[]
   sujet: string
   corps: string
   // Clé d'idempotence générée côté client à l'étape 5 : un double clic ou un
@@ -50,7 +54,8 @@ export async function POST(req: NextRequest) {
     const { status, body } = await deliverMail({
       commercial: { name: sender.name, email: sender.email, hubspot_id: sender.hubspot_id, slack_user_id: sender.slack_user_id },
       ps,
-      formation,
+      formation: { nom: formation.nom, numero: formation.numero },
+      sessions: await sessionsEnvoyees(formation, payload.session_ids),
       sujet,
       corps,
       idempotencyKey: payload.idempotencyKey,
@@ -61,5 +66,21 @@ export async function POST(req: NextRequest) {
   } catch (e: any) {
     console.error('Send error:', e)
     return NextResponse.json({ error: "Le mail n'a pas pu être envoyé. Réessaie dans quelques instants ; si le problème persiste, préviens Déthié." }, { status: 500 })
+  }
+}
+
+// Sessions du mail, relues côté serveur (cache Airtable) : seules les sessions liées à la formation
+// envoyée sont retenues. Jamais bloquant : sans sessions retrouvées, la relance les cherchera dans
+// le texte du mail (lib/relance).
+async function sessionsEnvoyees(formation: SendPayload['formation'], ids: unknown): Promise<{ ids: string[]; numeros: string[] } | undefined> {
+  const sessionIds = Array.isArray(ids) ? ids.filter((x): x is string => typeof x === 'string').slice(0, 20) : []
+  if (!formation?.id || !sessionIds.length) return undefined
+  try {
+    const selection = await getFormationAndSessions(formation.id, sessionIds)
+    if (!selection || String(selection.formation.numero).trim() !== String(formation.numero || '').trim() || !selection.sessions.length) return undefined
+    return { ids: selection.sessions.map((s) => s.id), numeros: selection.sessions.map((s) => String(s.numero)) }
+  } catch (e: any) {
+    console.error('[SEND] Sessions du mail non enregistrées :', e.message)
+    return undefined
   }
 }

@@ -319,6 +319,24 @@ Données : `seed --relances`, puis les 3 envois `test-rel-non-ouvert` / `-ouvert
 | N4 | Contact choisi à l'étape 4 | `cache:deja_faites:{empreinte}` créé (10 min) ; la rédaction n'interroge plus Clients / Inscriptions |
 | N5 | Aucune mention de l'IA | aucune occurrence de « Claude », « IA », « intelligence artificielle » dans l'interface, les messages d'erreur, les champs de l'API (`redigee`), les DM, les Notes et les mails |
 
+### S. Sessions proposées dans une relance (fix/relance-sessions)
+
+Données : `node --no-warnings scripts/seed-test.ts seed-relance-sessions [--due]` (8 envois `test-rs-*` de la fiche de test sur de vraies formations, sessions du mail d'origine enregistrées ; `--due` : `test-rs-aucune` et `test-rs-valides` dus aujourd'hui pour le cron, DM au Slack de test). Tests sans réseau : `node scripts/test-relance-sessions.ts` (règle d'ouverture, choix des sessions, numéros cités, dates passées). Date du jour simulée : `DEV_TODAY=AAAA-MM-JJ` dans `.env.local` (développement local uniquement, routes rechargées à chaud), **à retirer** après le test, puis vérifier l'empreinte de `.env.local`.
+
+| # | Étapes | Attendu |
+|---|---|---|
+| S1 | `GET /api/relance` sur `test-rs-valides`, `-partielles`, `-passees`, `-inconnues`, `-aucune`, `-elearning` (13/10/2026) | modes `origine` (26.011 et 26.012), `origine` (26.011 seule), `remplacement` (26.011, 26.012, 26.013 + message), `inconnues` (3 prochaines + message), `aucune` (Refus scolaire anxieux, dernière session le 12/10 : `possible: false`), `origine` (e-learning 26.038 en cours) |
+| S2 | `test-rs-brouillon-valide` : `GET` puis `POST /api/relance/generate` | brouillon repris (`redigee: true`) ; « Brouillon déjà rédigé renvoyé, sans appel à Claude » |
+| S3 | `test-rs-brouillon-obsolete` : `GET`, `POST generate` deux fois | `GET` : brouillon ignoré (`redigee: false`) ; 1er `POST` : un seul « Appel à Claude », sessions 26.011 à 26.013 ; 2e `POST` : sans appel |
+| S4 | `POST generate` et `POST /api/relance/send` sur `test-rs-aucune` | 409 « Aucune session à venir pour cette formation : relance impossible pour le moment. » ; `/suivi` : « Relancer » désactivé avec ce message |
+| S5 | `POST /api/relance/send` sur `test-rs-passees` avec un texte citant 26.010 | 409 « La session 26.010 n'est plus ouverte à l'inscription : retire-la du texte de la relance. », rien n'est envoyé. **Attention** : un texte qui ne cite que des sessions ouvertes part réellement (vers le contact de test) |
+| S6 | Fenêtre de relance : ajouter à la main une date passée (« le 8/10/2026 sur la session… ») | avertissement « cette date est déjà passée », présenté comme les jours incohérents ; la date du premier mail (introduction) n'est pas signalée |
+| S7 | `DEV_TODAY` (veille d'une session) → étape 3, envoi réel `[TEST-…]` d'une session qui commence le lendemain ; `DEV_TODAY` retiré (jour de la session) → relance | entrée `email_track` avec `session_ids` / `session_numeros` ; relance en mode `remplacement` ; rédaction réelle ; envoi réel dans le fil du mail d'origine |
+| S8 | Étape 3 : une classe virtuelle qui commence aujourd'hui, une qui commence demain (`DEV_TODAY`), un e-learning commencé la veille (`DEV_TODAY`), un e-learning en cours, une formation « Hybride » | absente / présente / présent / présent / mêmes sessions que le code de `main` |
+| S9 | `npm run build && npm run start` avec `DEV_TODAY` présent | variable ignorée, `[CONFIG] DEV_TODAY présent hors développement local` dans les journaux |
+| S10 | `seed-relance-sessions --due`, `check-slack`, puis `GET /api/cron/relance` (en-tête `Authorization: Bearer $CRON_SECRET`) | 2 DM au Slack de test ; celui de `test-rs-aucune` contient « Plus aucune session à venir pour cette formation : propose une autre formation par téléphone. », celui de `test-rs-valides` non |
+| S11 | Comparaison de l'étape 3 avec le code de `main` sur les données Airtable du jour | seules disparaissent les classes virtuelles et présentiels qui commencent aujourd'hui ou avant, et ceux sans date ; aucun e-learning ni « Hybride » ne change |
+
 ### G. Non-régression complète
 
 Connexion Google → génération → envoi → `opened` → `clicked` → `/suivi` (statut « Cliqué », dates) → déconnexion.

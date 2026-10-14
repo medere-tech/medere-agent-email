@@ -153,3 +153,161 @@ export function checkWeekdays(input: string, today?: string): DateWarning[] {
   }
   return out
 }
+
+// ─── Ouverture à l'inscription ────────────────────────────────────────────────
+
+// Jour calendaire à Paris (AAAA-MM-JJ) d'un instant donné
+export function parisDay(date: Date = new Date()): string {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(date).map((x) => [x.type, x.value]))
+  return `${p.year}-${p.month}-${p.day}`
+}
+
+export interface OpenableSession extends SessionDates {
+  webflow_id?: string
+}
+
+const dayOf = (x: string | undefined) => (DAY.test(String(x || '')) ? String(x).slice(0, 10) : '')
+
+// Premier jour de la session : plus ancienne des dates « début de session » et « 1ère soirée / présentiel »
+export function sessionStartDay(s: SessionDates): string {
+  return [dayOf(s.date_debut), dayOf(s.date_cv1)].filter(Boolean).sort()[0] || ''
+}
+
+// Règle unique d'ouverture à l'inscription (étape 3 de l'assistant et relance), today = AAAA-MM-JJ
+// à Paris. Dans tous les cas : webflow_id présent (sinon doublon).
+//   classe virtuelle, présentiel : on ne peut pas s'inscrire le jour même ; la plus ancienne des dates
+//     « début de session » et « 1ère soirée / présentiel » doit être strictement postérieure à
+//     aujourd'hui ; une session sans aucune date n'est pas proposée
+//   e-learning (format contenant « e-learning ») et autres formats : règle d'avant, inchangée —
+//     sans date de début : proposée ; e-learning : proposée tant que sa date de fin n'est pas
+//     dépassée, même commencée ; autres formats : date de début aujourd'hui ou plus tard
+export function sessionOuverte(s: OpenableSession, format: string, today: string): boolean {
+  if (!s.webflow_id) return false
+  const f = String(format || '').toLowerCase()
+  if (f.includes('e-learning')) {
+    if (!s.date_debut) return true
+    const fin = dayOf(s.date_fin)
+    return !fin || fin >= today
+  }
+  const kind = sessionKind(format)
+  if (kind === 'classe_virtuelle' || kind === 'presentiel') {
+    const start = sessionStartDay(s)
+    return !!start && start > today
+  }
+  if (!s.date_debut) return true
+  const debut = dayOf(s.date_debut)
+  return !!debut && debut >= today
+}
+
+// ─── Sessions proposées dans une relance ──────────────────────────────────────
+
+export type RelanceMode = 'origine' | 'remplacement' | 'inconnues' | 'aucune'
+
+export const RELANCE_MESSAGES: Record<RelanceMode, string | null> = {
+  origine: null,
+  remplacement: 'Les sessions du premier mail sont passées : la relance propose les prochaines sessions disponibles.',
+  inconnues: "Les sessions du premier mail n'ont pas pu être retrouvées : la relance propose les prochaines sessions disponibles.",
+  aucune: 'Aucune session à venir pour cette formation : relance impossible pour le moment.',
+}
+
+export const RELANCE_MAX_SESSIONS = 3
+
+// origine : numéros des sessions du mail d'origine (null ou vide = inconnus) ; ouvertes : sessions
+// de la formation encore ouvertes à l'inscription (sessionOuverte).
+//   - au moins une session d'origine encore ouverte → uniquement celles-là ;
+//   - sinon, prochaines sessions ouvertes de la formation (3 au plus, de la plus proche à la plus lointaine) ;
+//   - aucune session ouverte → aucune.
+export function selectRelanceSessions<T extends SessionDates>(origine: string[] | null, ouvertes: T[]): { mode: RelanceMode; sessions: T[] } {
+  const sorted = [...ouvertes].sort((a, b) => sessionStartDay(a).localeCompare(sessionStartDay(b)))
+  if (!sorted.length) return { mode: 'aucune', sessions: [] }
+  if (!origine || !origine.length) return { mode: 'inconnues', sessions: sorted.slice(0, RELANCE_MAX_SESSIONS) }
+  const kept = sorted.filter((s) => origine.includes(String(s.numero)))
+  if (kept.length) return { mode: 'origine', sessions: kept }
+  return { mode: 'remplacement', sessions: sorted.slice(0, RELANCE_MAX_SESSIONS) }
+}
+
+// Numéros de session (parmi ceux de la formation) cités dans un texte : « 26.010 » isolé, jamais à
+// l'intérieur d'un autre nombre (« 126.0105 »)
+export function sessionNumbersIn(text: string, numeros: string[]): string[] {
+  const t = String(text || '')
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return Array.from(new Set(numeros.map((n) => String(n || '').trim()).filter(Boolean)))
+    .filter((n) => new RegExp(`(?<![\\d.])${esc(n)}(?!\\d|\\.\\d)`).test(t))
+}
+
+// ─── Dates de session déjà passées ────────────────────────────────────────────
+
+const DATE_RE = new RegExp(`(?<![\\d/])(1er|\\d{1,2})\\s+(${MONTHS_FOLDED.join('|')})\\b(?:\\s+(\\d{4}))?`, 'g')
+const NUM_DATE_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})\/(\d{4})(?![\d/])/g
+const WD_BEFORE = '(?:(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)\\s+)?$'
+const FROM_RE = new RegExp(`\\bdu\\s+${WD_BEFORE}`)
+const SINCE_RE = new RegExp(`a partir du\\s+${WD_BEFORE}`)
+const pad = (n: number) => String(n).padStart(2, '0')
+
+// Dates de session déjà passées (antérieures à today, AAAA-MM-JJ) écrites dans le texte. Une date
+// est considérée comme une date de session si elle porte un jour de la semaine (les libellés de
+// session en ont toujours) ou si sa ligne mentionne une session : la date du premier mail
+// (« transmis les informations le 13 octobre ») n'est pas signalée. Le début d'une période
+// (« du … au … », « à partir du … ») est ignoré : un e-learning commencé reste ouvert.
+export function checkPastDates(input: string, today: string): DateWarning[] {
+  const text = String(input || '')
+  if (!DAY.test(today)) return []
+  const folded = fold(text)
+  const out: DateWarning[] = []
+  const seen = new Set<number>()
+  const lineAt = (pos: number) => {
+    const a = folded.lastIndexOf('\n', pos - 1) + 1
+    const b = folded.indexOf('\n', pos)
+    return { start: a, text: folded.slice(a, b === -1 ? undefined : b) }
+  }
+  const isPeriodStart = (start: number, end: number) => {
+    const before = folded.slice(lineAt(start).start, start)
+    return SINCE_RE.test(before) || (FROM_RE.test(before) && /^[^\n]*?\bau\s+/.test(folded.slice(end)))
+  }
+  const push = (start: number, end: number, y: number, m: number, d: number, withWeekday: boolean) => {
+    if (seen.has(start)) return
+    seen.add(start)
+    if (!withWeekday && !/\bsessions?\b/.test(lineAt(start).text)) return
+    if (isPeriodStart(start, end) || weekdayOf(y, m, d) === null) return
+    const iso = `${y}-${pad(m)}-${pad(d)}`
+    if (iso >= today) return
+    const extrait = text.slice(start, end).replace(/\s+/g, ' ').trim()
+    // « mardi 13 et jeudi 15 octobre 2026 » : un seul avertissement pour la session (déjà cité)
+    if (out.some((w) => w.extrait.endsWith(extrait))) return
+    out.push({ extrait, message: `cette date est déjà passée (${formatLongDate(iso)}).` })
+  }
+  // « mardi 13 … octobre 2026 » (mois et année rattachés comme dans checkWeekdays)
+  for (const m of Array.from(folded.matchAll(WD_RE))) {
+    const start = m.index!
+    const end = start + m[0].length
+    const after = MONTH_AFTER.exec(folded.slice(end))
+    if (!after) continue
+    const month = MONTHS_FOLDED.indexOf(after[1]) + 1
+    const d = m[2] === '1er' ? 1 : Number(m[2])
+    const y = after[2] ? Number(after[2]) : inferYear(month, d, today)
+    // Le numéro du jour (sans le jour de la semaine) ne doit pas être repris par DATE_RE
+    seen.add(end - m[2].length)
+    push(start, end + after[0].length, y, month, d, true)
+  }
+  // « 13 octobre 2026 » sans jour de la semaine
+  for (const m of Array.from(folded.matchAll(DATE_RE))) {
+    const month = MONTHS_FOLDED.indexOf(m[2]) + 1
+    const d = m[1] === '1er' ? 1 : Number(m[1])
+    push(m.index!, m.index! + m[0].length, m[3] ? Number(m[3]) : inferYear(month, d, today), month, d, false)
+  }
+  // « 13/10/2026 »
+  for (const m of Array.from(folded.matchAll(NUM_DATE_RE))) {
+    push(m.index!, m.index! + m[0].length, Number(m[3]), Number(m[2]), Number(m[1]), false)
+  }
+  return out
+}
+
+// Contrôle complet d'un texte rédigé (étape 5 et relance) : jours de la semaine incohérents, puis
+// dates de session déjà passées (seulement si today est connu)
+export function checkDates(input: string, today?: string): DateWarning[] {
+  const weekdays = checkWeekdays(input, today)
+  if (!today) return weekdays
+  const flagged = new Set(weekdays.map((w) => w.extrait))
+  return [...weekdays, ...checkPastDates(input, today).filter((w) => !flagged.has(w.extrait))]
+}

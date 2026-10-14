@@ -17,6 +17,8 @@ export interface DeliverParams {
   commercial: { name: string; email: string; hubspot_id: string; slack_user_id: string }
   ps: { id: string; titre: string; nom: string; prenom: string; email: string; rpps?: string }
   formation: { nom: string; numero: string }
+  // Sessions proposées dans le mail (envoi initial), enregistrées dans le suivi pour la relance
+  sessions?: { ids: string[]; numeros: string[] }
   sujet: string
   corps: string
   idempotencyKey?: string
@@ -75,7 +77,7 @@ export async function deliverMail(p: DeliverParams): Promise<DeliverResult> {
   let relanceDate = ''
   if (kvEnabled) {
     try {
-      const recorded = await recordSend({ resendId: resendId!, commercial, ps, formation, sujet, corps, sentBy, kind: p.kind, parentId: p.parentId })
+      const recorded = await recordSend({ resendId: resendId!, commercial, ps, formation, sessions: p.sessions, sujet, corps, sentBy, kind: p.kind, parentId: p.parentId })
       if (!recorded.created) {
         const previous = await getKv().get<Record<string, any>>(`send_result:${resendId}`)
         if (previous) return { status: 200, body: { ...previous, replay: true } }

@@ -5,11 +5,13 @@
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return
   // Contrôles de configuration au démarrage (journal seulement, jamais bloquant) : profil
-  // administrateur complet, mode de test du rôle absent hors développement local
+  // administrateur complet, modes de test (rôle, date du jour) absents hors développement local
   const { adminProfile } = await import('@/lib/config')
   adminProfile()
   const { devForcedRole } = await import('@/lib/identity')
   devForcedRole()
+  const { devToday } = await import('@/lib/dev-today')
+  devToday()
   const { warmAirtableCaches } = await import('@/lib/airtable')
   const warm = () => warmAirtableCaches().catch((e: any) => console.error('[AIRTABLE] Préchauffage impossible :', e?.message))
   warm()

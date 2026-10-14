@@ -36,6 +36,8 @@ export interface RecordSendParams {
   commercial: { name: string; email: string; hubspot_id?: string; slack_user_id?: string }
   ps: { id: string; titre: string; prenom: string; nom: string; email: string; rpps?: string }
   formation: { nom: string; numero?: string }
+  // Sessions proposées dans le mail (records et numéros Airtable) : relance (lib/relance)
+  sessions?: { ids: string[]; numeros: string[] }
   sujet: string
   corps: string
   // Administrateur ayant envoyé au nom du commercial (traçabilité)
@@ -84,6 +86,7 @@ export async function recordSend(p: RecordSendParams): Promise<RecordSendResult>
     ps_titre: p.ps.titre || '',
     ps_lastname: p.ps.nom || '',
     formation_numero: p.formation.numero || '',
+    ...(p.sessions?.numeros.length ? { session_ids: p.sessions.ids, session_numeros: p.sessions.numeros } : {}),
     open_count: 0,
     click_count: 0,
     ...(isRelance ? { parent_id: p.parentId || '' } : { relance_due_day: relanceDate }),

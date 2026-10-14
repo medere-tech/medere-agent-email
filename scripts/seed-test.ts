@@ -5,6 +5,7 @@
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed [--relance] [--names] [--clicks] [--purge] [--relances] [--historique]
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed-suivi   (page /suivi : 60 envois, relances, compteurs)
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed-prod [--old-writes]   (format de la production actuelle)
+ *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts seed-relance-sessions [--due]   (sessions proposées dans une relance)
  *   TEST_KV_HOST=<hôte-kv-de-test> node scripts/seed-test.ts webhook <type> <email_id> [--created-at=<iso>] [--message-id=<id>] [--svix-id=<suffixe>]
  *       type : delivered | bounced | complained | opened | clicked
  *       --created-at : date de l'événement (défaut : maintenant)
@@ -39,6 +40,10 @@
  *   emails_index                     + les ids ci-dessus
  *   relance:test-seed-today          (--relance) relance du jour, rattachable à test-seed-envoye
  *   relance:test-seed-orphan         (--relance) relance sans envoi correspondant (reprise en legacy)
+ *   email_track:test-rs-*            (seed-relance-sessions) envois v2 de la fiche de test (profil administrateur) sur de vraies
+ *                                    formations, avec les sessions du mail d'origine (session_numeros), sans échéance J+3
+ *                                    (--due : test-rs-aucune et test-rs-valides dus aujourd'hui, DM Slack de test) ;
+ *   relance_draft:test-rs-brouillon-* brouillons de relance enregistrés (obsolète / encore valable)
  *
  * Les compteurs stats:day:* et meta:commerciaux alimentés par ces entrées après migration ne
  * sont pas retirés par "clean" : pour un nettoyage complet, restaurer l'export de début de
@@ -56,7 +61,24 @@ const OTHER_PS = { contact_id: '99999999999', ps_email: 'ps.fictif@example.inval
 const RELANCE_IDS = ['test-rel-non-ouvert', 'test-rel-ouvert', 'test-rel-clique', 'test-rel-bounce', 'test-rel-plainte', 'test-rel-deja', 'test-rel-sans-slack', 'test-rel-zacharie']
 // --historique : envois récents au contact de test (alerte « déjà contacté » de l'étape 4)
 const HISTORY_IDS = ['test-hist-2j', 'test-hist-6j', 'test-hist-6j-relance', 'test-hist-20j', 'test-hist-autre']
-const SEED_IDS = ['test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS, ...RELANCE_IDS, ...HISTORY_IDS]
+// seed-relance-sessions : [id, numéro DPC de la formation, sessions du mail d'origine, brouillon enregistré]
+// Formations réelles (catalogue Airtable) : L'IA en santé pour les médecins (Classe virtuelle), COVID long (E-learning),
+// Refus scolaire anxieux (Classe virtuelle, dernière session le 12/10/2026 : plus aucune session ouverte)
+const IA_CV = '92622626007'
+const COVID_EL = '92622425394'
+const RSA_CV = '92622525450'
+const RS_CASES: [string, string, string[] | null, string[] | null][] = [
+  ['test-rs-valides', IA_CV, ['26.011', '26.012'], null],
+  ['test-rs-partielles', IA_CV, ['26.010', '26.011'], null],
+  ['test-rs-passees', IA_CV, ['26.010'], null],
+  ['test-rs-inconnues', IA_CV, null, null],
+  ['test-rs-aucune', RSA_CV, ['26.013'], null],
+  ['test-rs-elearning', COVID_EL, ['26.038'], null],
+  ['test-rs-brouillon-obsolete', IA_CV, ['26.010'], ['26.010']],
+  ['test-rs-brouillon-valide', IA_CV, ['26.011'], ['26.011']],
+]
+const RS_IDS = RS_CASES.map((c) => c[0])
+const SEED_IDS = [...RS_IDS, 'test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS, ...RELANCE_IDS, ...HISTORY_IDS]
 const RELANCE_KEYS = ['relance:test-seed-today', 'relance:test-seed-orphan', 'relance:test-purge-zacharie', 'relance:test-autre-ps', 'relance:test-rel-legacy']
 const SEED_COMMERCIAL_KEYS = ['nom:commercial-de-test', 'kaoufer@medere.fr', 'nom:loane-deluge', 'zacharie@medere.fr', 'sarah.s@medere.fr']
 const WEBHOOK_PREFIX = 'msg_seedtest_'
@@ -543,10 +565,55 @@ async function seedProd(oldWrites: boolean): Promise<void> {
   console.log(`seed-prod --old-writes : ${extra.length} nouveaux envois au format ancien (+ relance:*), ${touched} webhook(s) de l'ancien code sur des envois déjà migrés (3 ouvertures, 2 clics, 1 ouverture sur un envoi cliqué).`)
 }
 
+// Envois v2 (format de recordSend) de la fiche de test, au contact de test, sans échéance J+3 (aucun
+// DM ; --due : test-rs-aucune et test-rs-valides dus aujourd'hui, DM au Slack de test) : sessions du mail d'origine enregistrées (session_numeros) ou absentes (test-rs-inconnues : le
+// texte demandé à Resend pour cet identifiant fictif est introuvable). Brouillons rédigés : texte
+// fictif portant les libellés des sessions, enregistré avec leurs numéros (v: 3).
+async function seedRelanceSessions(withDue: boolean): Promise<void> {
+  const contactId = required('TEST_HUBSPOT_CONTACT_ID')
+  const adminEmail = required('ADMIN_EMAIL').toLowerCase()
+  const now = Date.now()
+  const sentAt = new Date(now - 3 * 86400000).toISOString()
+  const labels: Record<string, string> = {
+    '26.010': 'Session 26.010 : mardi 13 et jeudi 15 octobre 2026, en soirée à partir de 19h00',
+    '26.011': 'Session 26.011 : lundi 2 et mercredi 4 novembre 2026, en soirée à partir de 19h00',
+  }
+  const names: Record<string, string> = {
+    [IA_CV]: "L'IA en santé pour les médecins (Classe virtuelle)",
+    [COVID_EL]: 'Repérer et prendre en charge les symptômes associés au COVID long, Programme intégré (E-learning)',
+    [RSA_CV]: 'Refus scolaire anxieux : repérage et accompagnement, Programme intégré (Classe virtuelle)',
+  }
+  for (const [id, numero, sessions, draft] of RS_CASES) {
+    const entry = {
+      contact_id: contactId, ps_nom: 'Monsieur Test', ps_email: required('TEST_PS_EMAIL'),
+      commercial_name: required('ADMIN_NAME'), formation_nom: names[numero], sujet: `[TEST-RS] ${id.replace('test-rs-', '')}`,
+      statut: 'délivré', sent_at: sentAt, opened_at: null, clicked_at: null,
+      v: 2, kind: 'initial', sent_day: sentAt.slice(0, 10), commercial_key: adminEmail, commercial_email: adminEmail,
+      commercial_slack_id: required('TEST_SLACK_USER_ID'), commercial_hubspot_id: required('ADMIN_HUBSPOT_OWNER_ID'),
+      ps_rpps: '', ps_titre: 'Monsieur', ps_lastname: 'Test', formation_numero: numero, open_count: 0, click_count: 0,
+      ...(sessions ? { session_numeros: sessions } : {}), counted_sent: true,
+    }
+    await kv('SET', `email_track:${id}`, JSON.stringify(entry))
+    await kv('ZADD', 'emails_index', Date.parse(sentAt), id)
+    await kv('ZADD', `idx:commercial:${adminEmail}`, Date.parse(sentAt), id)
+    await kv('ZADD', `idx:contact:${contactId}`, Date.parse(sentAt), id)
+    if (withDue && (id === 'test-rs-aucune' || id === 'test-rs-valides')) {
+      await kv('ZADD', 'relances_due', Date.parse(`${new Date(now).toISOString().slice(0, 10)}T00:00:00Z`), id)
+    }
+    if (draft) {
+      const corps = `Bonjour Monsieur Test,\n\n[TEST-RS] brouillon enregistré (${id}).\n\nVoici la session disponible :\n${draft.map((n) => labels[n]).join('\n')}\n\nBien cordialement,`
+      await kv('SET', `relance_draft:${id}`, JSON.stringify({ v: 3, corps, generated_at: sentAt, generated_by: adminEmail, sessions: draft }), 'EX', 7 * 86400)
+    }
+    console.log(`email_track:${id}  formation ${numero}  sessions ${sessions ? sessions.join(', ') : '(non enregistrées)'}${draft ? `  brouillon ${draft.join(', ')}` : ''}`)
+  }
+  console.log(`\n${RS_CASES.length} envoi(s) créé(s). Nettoyage : seed-test.ts clean, puis restauration de l'export de début de session.`)
+}
+
 async function clean(): Promise<void> {
   const keys = [
     ...SEED_IDS.flatMap((id) => [`email_track:${id}`, `email_body:${id}`, `email_clicks:${id}`, `hubspot_note:${id}:opened`, `hubspot_note:${id}:clicked`]),
     ...(await scan('email_track:test-suivi-*')),
+    ...RS_IDS.flatMap((id) => [`relance_draft:${id}`, `relance_lock:${id}`, `relance_gen_lock:${id}`]),
     ...RELANCE_KEYS,
     ...(await scan(`webhook_event:${WEBHOOK_PREFIX}*`)),
   ]
@@ -558,6 +625,7 @@ async function clean(): Promise<void> {
     'relances_due',
     `idx:contact:${required('TEST_HUBSPOT_CONTACT_ID')}`,
     `idx:contact:${OTHER_PS.contact_id}`,
+    `idx:commercial:${required('ADMIN_EMAIL').toLowerCase()}`,
     'idx:contact:0',
     ...SEED_COMMERCIAL_KEYS.map((k) => `idx:commercial:${k}`),
   ]
@@ -606,6 +674,7 @@ async function main(): Promise<void> {
   if (cmd === 'clean') return clean()
   if (cmd === 'seed-suivi') return seedSuivi()
   if (cmd === 'seed-prod') return seedProd(args.includes('--old-writes'))
+  if (cmd === 'seed-relance-sessions') return seedRelanceSessions(args.includes('--due'))
   if (cmd === 'check-slack') return checkSlack()
   console.error(`Commande inconnue : ${cmd} (seed | webhook | clean | check-slack)`)
   process.exit(1)

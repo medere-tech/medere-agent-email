@@ -3,13 +3,13 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { linkWarnings, renderMail } from '@/lib/render-mail'
 import { parseGeneratedMail } from '@/lib/generated-mail'
-import { checkWeekdays } from '@/lib/session-label'
+import { checkDates } from '@/lib/session-label'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 // Fiche commercial (id Airtable) : le serveur relit nom, email, HubSpot et Slack à partir de l'id
 interface Commercial { id: string; name: string; email: string }
 // Personne connectée (rôle déterminé côté serveur)
-interface Me { email: string; name: string; role: 'admin' | 'commercial' | 'lecteur'; commercial: Commercial | null }
+interface Me { email: string; name: string; role: 'admin' | 'commercial' | 'lecteur'; commercial: Commercial | null; aujourdhui?: string }
 interface Formation { id: string; nom: string; numero: string; format: string; public: string[] }
 interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string }
 interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
@@ -392,9 +392,10 @@ export default function AgentMail() {
   // Aperçu fidèle : même fonction de rendu que l'envoi ; avertissements une fois la rédaction finie
   const previewHtml = useMemo(() => renderMail(mailCorps).html, [mailCorps])
   const warnings = useMemo(() => (generating ? [] : linkWarnings(mailCorps)), [mailCorps, generating])
-  // Jours de la semaine contrôlés sur le texte final (et à chaque modification)
-  const dateWarnings = useMemo(() => (generating ? [] : checkWeekdays(`${mailSujet}
-${mailCorps}`)), [mailSujet, mailCorps, generating])
+  // Jours de la semaine et dates de session déjà passées (date du jour du serveur), contrôlés sur le
+  // texte final et à chaque modification
+  const dateWarnings = useMemo(() => (generating ? [] : checkDates(`${mailSujet}
+${mailCorps}`, me?.aujourdhui)), [mailSujet, mailCorps, generating, me?.aujourdhui])
 
   const toggleSession = (s: Session) => {
     setSelectedSessions((prev) =>
@@ -527,7 +528,8 @@ ${mailCorps}`)), [mailSujet, mailCorps, generating])
             email: psContact.email,
             rpps: psContact.rpps || '',
           },
-          formation: { nom: formation!.nom, numero: formation!.numero },
+          formation: { id: formation!.id, nom: formation!.nom, numero: formation!.numero },
+          session_ids: selectedSessions.map((s) => s.id),
           sujet: mailSujet,
           corps: mailCorps,
           idempotencyKey,
