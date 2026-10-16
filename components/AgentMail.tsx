@@ -11,7 +11,7 @@ interface Commercial { id: string; name: string; email: string }
 // Personne connectée (rôle déterminé côté serveur)
 interface Me { email: string; name: string; role: 'admin' | 'commercial' | 'lecteur'; commercial: Commercial | null; aujourdhui?: string }
 interface Formation { id: string; nom: string; numero: string; format: string; public: string[] }
-interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string }
+interface Session { id: string; session_id: string; numero: string; date_debut: string; date_cv1: string; date_cv2: string; temps_lisible: string; alerte_date?: string | null }
 interface HSContact { id: string; firstname: string; lastname: string; email: string; specialite?: string; rpps?: string }
 
 // Envoi récent au même contact (alerte « déjà contacté » de l'étape 4)
@@ -755,6 +755,11 @@ ${mailCorps}`, me?.aujourdhui)), [mailSujet, mailCorps, generating, me?.aujourdh
                             <div className="text-xs text-zinc-500 flex items-center gap-1 mt-0.5">
                               <Icons.Calendar />{dateLabel}
                             </div>
+                            {s.alerte_date && (
+                              <div className="text-xs text-zinc-900 flex items-start gap-1 mt-1" data-alerte="date-webflow">
+                                <Icons.Warning /><span>{s.alerte_date}</span>
+                              </div>
+                            )}
                           </div>
                         </div>
                         {s.session_id && (
@@ -993,6 +998,15 @@ ${mailCorps}`, me?.aujourdhui)), [mailSujet, mailCorps, generating, me?.aujourdh
                   )}
                 </div>
               </div>
+
+              {/* Sessions choisies dont la date du mail diffère du texte Webflow de l'étape 3 (non bloquant) */}
+              {selectedSessions.some((s) => s.alerte_date) && (
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-sm text-zinc-700 space-y-1" data-alerte="date-webflow">
+                  {selectedSessions.filter((s) => s.alerte_date).map((s) => (
+                    <div key={s.id} className="flex items-start gap-2"><Icons.Warning /><span><strong>Session {s.numero}</strong> · {s.alerte_date}</span></div>
+                  ))}
+                </div>
+              )}
 
               {dateWarnings.length > 0 && (
                 <div className="p-3 bg-white border border-zinc-900 rounded-lg text-sm text-zinc-900" data-alerte="dates">

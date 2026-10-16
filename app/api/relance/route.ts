@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireActor } from '@/lib/identity'
+import { webflowDateCheck } from '@/lib/session-label'
 import { RELANCE_STATUS_LABEL, checkRelance, draftAJour, relanceDraft, relanceSessions, relanceStatus, relanceSubject, storedRelance } from '@/lib/relance'
 
 export const dynamic = 'force-dynamic'
@@ -26,6 +27,11 @@ export async function GET(req: NextRequest) {
       redigee: !!redigee,
       mode: rs.mode,
       message: rs.message,
+      // Sessions proposées dont la date du mail diffère du texte Webflow (non bloquant)
+      alertesDates: rs.sessions.flatMap((s) => {
+        const check = webflowDateCheck(s, rs.format)
+        return check ? [{ numero: s.numero, message: check.message }] : []
+      }),
       possible: rs.mode !== 'aucune',
       aujourdhui: rs.today,
       statut: RELANCE_STATUS_LABEL[relanceStatus(entry)],

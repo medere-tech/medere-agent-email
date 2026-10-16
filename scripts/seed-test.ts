@@ -63,10 +63,12 @@ const RELANCE_IDS = ['test-rel-non-ouvert', 'test-rel-ouvert', 'test-rel-clique'
 const HISTORY_IDS = ['test-hist-2j', 'test-hist-6j', 'test-hist-6j-relance', 'test-hist-20j', 'test-hist-autre']
 // seed-relance-sessions : [id, numéro DPC de la formation, sessions du mail d'origine, brouillon enregistré]
 // Formations réelles (catalogue Airtable) : L'IA en santé pour les médecins (Classe virtuelle), COVID long (E-learning),
-// Refus scolaire anxieux (Classe virtuelle, dernière session le 12/10/2026 : plus aucune session ouverte)
+// Refus scolaire anxieux (Classe virtuelle, dernière session le 12/10/2026 : plus aucune session ouverte),
+// Odontologie pédiatrique (Présentiel, session 26.002 : site « 17 décembre 2026 », fiche au 16/12 → avertissement de date)
 const IA_CV = '92622626007'
 const COVID_EL = '92622425394'
 const RSA_CV = '92622525450'
+const ODONTO_PRES = '92622525485'
 const RS_CASES: [string, string, string[] | null, string[] | null][] = [
   ['test-rs-valides', IA_CV, ['26.011', '26.012'], null],
   ['test-rs-partielles', IA_CV, ['26.010', '26.011'], null],
@@ -76,6 +78,7 @@ const RS_CASES: [string, string, string[] | null, string[] | null][] = [
   ['test-rs-elearning', COVID_EL, ['26.038'], null],
   ['test-rs-brouillon-obsolete', IA_CV, ['26.010'], ['26.010']],
   ['test-rs-brouillon-valide', IA_CV, ['26.011'], ['26.011']],
+  ['test-rs-date-webflow', ODONTO_PRES, ['26.002'], null],
 ]
 const RS_IDS = RS_CASES.map((c) => c[0])
 const SEED_IDS = [...RS_IDS, 'test-seed-envoye', 'test-legacy', 'test-legacy-kaoufer', 'test-legacy-loane', ...CLICK_IDS, ...PURGE_IDS, ...RELANCE_IDS, ...HISTORY_IDS]
@@ -582,6 +585,7 @@ async function seedRelanceSessions(withDue: boolean): Promise<void> {
     [IA_CV]: "L'IA en santé pour les médecins (Classe virtuelle)",
     [COVID_EL]: 'Repérer et prendre en charge les symptômes associés au COVID long, Programme intégré (E-learning)',
     [RSA_CV]: 'Refus scolaire anxieux : repérage et accompagnement, Programme intégré (Classe virtuelle)',
+    [ODONTO_PRES]: 'Prise en charge clinique en odontologie pédiatrique : prévention et thérapeutiques minimalement invasives, Programme intégré (Présentiel)',
   }
   for (const [id, numero, sessions, draft] of RS_CASES) {
     const entry = {

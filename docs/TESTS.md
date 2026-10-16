@@ -321,7 +321,7 @@ Données : `seed --relances`, puis les 3 envois `test-rel-non-ouvert` / `-ouvert
 
 ### S. Sessions proposées dans une relance (fix/relance-sessions)
 
-Données : `node --no-warnings scripts/seed-test.ts seed-relance-sessions [--due]` (8 envois `test-rs-*` de la fiche de test sur de vraies formations, sessions du mail d'origine enregistrées ; `--due` : `test-rs-aucune` et `test-rs-valides` dus aujourd'hui pour le cron, DM au Slack de test). Tests sans réseau : `node scripts/test-relance-sessions.ts` (règle d'ouverture, choix des sessions, numéros cités, dates passées). Date du jour simulée : `DEV_TODAY=AAAA-MM-JJ` dans `.env.local` (développement local uniquement, routes rechargées à chaud), **à retirer** après le test, puis vérifier l'empreinte de `.env.local`.
+Données : `node --no-warnings scripts/seed-test.ts seed-relance-sessions [--due]` (9 envois `test-rs-*` de la fiche de test sur de vraies formations, dont `test-rs-date-webflow` (odontologie pédiatrique, session 26.002 : avertissement de date Webflow), sessions du mail d'origine enregistrées ; `--due` : `test-rs-aucune` et `test-rs-valides` dus aujourd'hui pour le cron, DM au Slack de test). Tests sans réseau : `node scripts/test-relance-sessions.ts` (règle d'ouverture, choix des sessions, numéros cités, dates passées). Date du jour simulée : `DEV_TODAY=AAAA-MM-JJ` dans `.env.local` (développement local uniquement, routes rechargées à chaud), **à retirer** après le test, puis vérifier l'empreinte de `.env.local`.
 
 | # | Étapes | Attendu |
 |---|---|---|
