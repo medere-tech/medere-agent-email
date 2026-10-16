@@ -20,6 +20,8 @@ interface Draft {
   // Sessions relues dans Airtable : origine, remplacement, inconnues ou aucune (relance impossible)
   mode: 'origine' | 'remplacement' | 'inconnues' | 'aucune'
   message: string | null
+  // Sessions proposées dont la date du mail diffère du texte « Temps lisible (Webflow) »
+  alertesDates?: { numero: string; message: string }[]
   possible: boolean
   aujourdhui: string
   ps: { nom: string; email: string }
@@ -176,6 +178,13 @@ ${corps}`, draft?.aujourdhui)), [sujet, corps, generating, draft?.aujourdhui])
               {draft.message && (
                 <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${possible ? 'bg-zinc-50 border border-zinc-200 text-zinc-700' : 'bg-white border border-zinc-900 text-zinc-900'}`} data-alerte="sessions">
                   <Icon.Warning /><span>{draft.message}</span>
+                </div>
+              )}
+              {!!draft.alertesDates?.length && (
+                <div className="p-3 bg-white border border-zinc-300 rounded-lg text-sm text-zinc-700 space-y-1" data-alerte="date-webflow">
+                  {draft.alertesDates.map((a) => (
+                    <div key={a.numero} className="flex items-start gap-2"><Icon.Warning /><span><strong>Session {a.numero}</strong> · {a.message}</span></div>
+                  ))}
                 </div>
               )}
               {draft.auNomDe && (

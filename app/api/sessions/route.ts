@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getSessionsByFormation, warmSessionsCache } from '@/lib/airtable'
 import { requireActor } from '@/lib/identity'
+import { webflowDateCheck } from '@/lib/session-label'
 
 export const dynamic = 'force-dynamic'
 
@@ -18,7 +19,9 @@ export async function GET(req: NextRequest) {
     const formationFormat = req.nextUrl.searchParams.get('format') || ''
     if (!formationId) return NextResponse.json({ error: "Choisis d'abord une formation." }, { status: 400 })
 
-    const sessions = await getSessionsByFormation(formationId, formationFormat)
+    // alerte_date : la date du mail ne concorde pas avec le texte Webflow affiché (non bloquant)
+    const sessions = (await getSessionsByFormation(formationId, formationFormat))
+      .map((s) => ({ ...s, alerte_date: webflowDateCheck(s, formationFormat)?.message || null }))
     return NextResponse.json({ sessions })
   } catch (e: any) {
     console.error('[SESSIONS] Chargement impossible:', e.message)

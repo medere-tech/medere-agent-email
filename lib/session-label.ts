@@ -311,3 +311,117 @@ export function checkDates(input: string, today?: string): DateWarning[] {
   const flagged = new Set(weekdays.map((w) => w.extrait))
   return [...weekdays, ...checkPastDates(input, today).filter((w) => !flagged.has(w.extrait))]
 }
+
+// ─── Concordance avec le texte « Temps lisible (Webflow) » ────────────────────
+
+const F_DEBUT = 'Date de début de session'
+const F_CV1 = 'Date 1ère soirée CV / Date Présentiel'
+const F_CV2 = 'Date 2ème soirée CV'
+
+interface WebflowDates {
+  extrait: string
+  // jour : « 17 décembre 2026 », « 24 novembre et 1 décembre 2026 » ; mois : « Septembre 2026 » ;
+  // annee : « Session 2026 »
+  precision: 'jour' | 'mois' | 'annee'
+  days: { d: number; m: number; y?: number }[]
+  month?: number
+  year?: number
+}
+
+const WEBFLOW_TOKEN_RE = new RegExp(`(?<!\\d)(\\d{4})(?!\\d)|(?<!\\d)(1er|\\d{1,2})(?!\\d)|\\b(${MONTHS_FOLDED.join('|')})\\b`, 'g')
+
+// Dates du texte Webflow, lues dans l'ordre : un mois (puis une année) s'applique aux jours qui le
+// précèdent. null si le texte ne contient aucune date.
+function parseWebflowDates(input: string): WebflowDates | null {
+  const text = String(input || '')
+  const folded = fold(text)
+  const days: { d: number; m?: number; y?: number }[] = []
+  let month: number | undefined
+  let year: number | undefined
+  let start = -1
+  let end = -1
+  for (const t of Array.from(folded.matchAll(WEBFLOW_TOKEN_RE))) {
+    if (t[1]) {
+      const y = Number(t[1])
+      days.forEach((x) => { if (x.y === undefined) x.y = y })
+      if (year === undefined) year = y
+    } else if (t[2]) {
+      const d = t[2] === '1er' ? 1 : Number(t[2])
+      if (d < 1 || d > 31) continue
+      days.push({ d })
+    } else {
+      const m = MONTHS_FOLDED.indexOf(t[3]) + 1
+      days.forEach((x) => { if (x.m === undefined) x.m = m })
+      if (month === undefined) month = m
+    }
+    if (start === -1) start = t.index!
+    end = t.index! + t[0].length
+  }
+  if (start === -1) return null
+  const extrait = text.slice(start, end).replace(/\s+/g, ' ').trim()
+  const dated = days.filter((x): x is { d: number; m: number; y?: number } => x.m !== undefined)
+  if (dated.length) return { extrait, precision: 'jour', days: dated }
+  if (month !== undefined) return { extrait, precision: 'mois', days: [], month, year }
+  if (year !== undefined) return { extrait, precision: 'annee', days: [], year }
+  return null
+}
+
+// « 16 décembre », « 13 et 15 octobre », « 24 novembre et 1er décembre 2026 » (année si demandée)
+function joinPlainDays(days: string[], withYear: boolean): string {
+  const ps = days.map(parts).filter((p): p is Parts => !!p)
+  const out = ps.map((p, i) => {
+    const next = ps[i + 1]
+    let s = dayNum(p.d)
+    if (!next || next.m !== p.m || next.y !== p.y) s += ` ${MONTHS[p.m - 1]}`
+    if (withYear && (!next || next.y !== p.y)) s += ` ${p.y}`
+    return s
+  })
+  return out.length === 1 ? out[0] : `${out.slice(0, -1).join(', ')} et ${out[out.length - 1]}`
+}
+
+export interface WebflowDateCheck {
+  site: string        // dates lues dans le texte Webflow (« 17 décembre 2026 »)
+  mail: string        // dates du mail (« 16 décembre »)
+  champs: string[]    // champs Airtable d'où vient la date du mail, à corriger si le site a raison
+  message: string     // avertissement affiché (étape 3, étape 5, relance)
+}
+
+// La date écrite dans le mail (sessionDatesText) concorde-t-elle avec le texte « Temps lisible
+// (Webflow) » affiché à l'étape 3 ? null si oui, ou si rien n'est comparable (texte ou fiche sans date).
+//   texte au jour (« 17 décembre 2026 ») : mêmes jours que le mail (1ère et 2ème soirée, ou date du
+//     présentiel, date de début à défaut ; e-learning : date de début) ;
+//   texte au mois ou à l'année (« Septembre 2026 », « Session 2026 » : e-learning, hybride) : mois ou
+//     année de la date de début de session.
+export function webflowDateCheck(s: SessionDates & { temps_lisible?: string }, format: string): WebflowDateCheck | null {
+  const w = parseWebflowDates(s.temps_lisible || '')
+  if (!w) return null
+  const make = (mail: string, champs: string[]): WebflowDateCheck => ({
+    site: w.extrait, mail, champs,
+    message: `Date à vérifier : le site indique « ${w.extrait} », le mail indiquera ${mail}. Préviens Maylis.`,
+  })
+  if (w.precision !== 'jour') {
+    const debut = dayOf(s.date_debut)
+    const p = parts(debut)
+    if (!p) return null
+    const ok = w.precision === 'mois' ? p.m === w.month && (w.year === undefined || p.y === w.year) : p.y === w.year
+    return ok ? null : make(`un début de session le ${joinPlainDays([debut], true)}`, [F_DEBUT])
+  }
+  const elearning = sessionKind(format) === 'elearning'
+  const cv = uniq([s.date_cv1, s.date_cv2])
+  const fromCv = !elearning && cv.length > 0
+  const mailDays = elearning ? uniq([s.date_debut]) : fromCv ? cv : uniq([s.date_debut])
+  if (!mailDays.length) return null
+  const refYear = Number(mailDays[0].slice(0, 4))
+  const siteDays = Array.from(new Set(w.days.map((x) => `${x.y ?? refYear}-${pad(x.m)}-${pad(x.d)}`))).sort()
+  if (siteDays.length === mailDays.length && siteDays.every((d, i) => d === mailDays[i])) return null
+  let champs = [F_DEBUT]
+  if (fromCv) {
+    champs = []
+    if (siteDays[0] !== dayOf(s.date_cv1)) champs.push(F_CV1)
+    if ((siteDays[1] || '') !== dayOf(s.date_cv2)) champs.push(F_CV2)
+    if (!champs.length) champs = [F_CV1]
+  }
+  const siteYears = new Set(w.days.map((x) => x.y ?? refYear))
+  const withYear = mailDays.some((d) => !siteYears.has(Number(d.slice(0, 4))))
+  return make(`${mailDays.length > 1 ? 'les' : 'le'} ${joinPlainDays(mailDays, withYear)}`, champs)
+}

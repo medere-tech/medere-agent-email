@@ -1,10 +1,11 @@
 /**
- * Tests des libellés de session et du contrôle « jour de la semaine + date » (lib/session-label.ts).
+ * Tests des libellés de session, du contrôle « jour de la semaine + date » et de la concordance avec le
+ * texte « Temps lisible (Webflow) » (lib/session-label.ts).
  * Aucun appel réseau, aucun envoi. Sessions réelles relevées dans Airtable le 13 octobre 2026.
  *
  * Usage (Node ≥ 22.18) : node scripts/test-session-dates.ts        (exit 1 au premier écart)
  */
-import { checkWeekdays, formatLongDate, sessionLabel } from '../lib/session-label.ts'
+import { checkWeekdays, formatLongDate, sessionLabel, webflowDateCheck } from '../lib/session-label.ts'
 
 let failures = 0
 function eq(name: string, actual: unknown, expected: unknown) {
@@ -70,6 +71,34 @@ eq('contrôle — date inexistante', checkWeekdays('lundi 31 novembre 2026', TOD
 ])
 eq('contrôle — pas de mois proche : ignoré', checkWeekdays('Je vous rappelle jeudi 15. En octobre, la formation…', TODAY), [])
 eq('contrôle — texte sans date', checkWeekdays('Bonjour Docteur, voici les étapes.', TODAY), [])
+
+// ─── Concordance avec le texte « Temps lisible (Webflow) » (sessions réelles du 16 octobre 2026) ──
+const HYB = 'Hybride'
+const wf = (s: Record<string, string>, format: string) => webflowDateCheck(s as any, format)
+eq('webflow — présentiel 26.002 (site 17/12, fiche 16/12)', wf({ numero: '26.002', date_debut: '2026-12-16', date_fin: '2027-03-31', date_cv1: '2026-12-16', temps_lisible: '17 décembre 2026 - Rencontres Médéré Paris' }, PRES), {
+  site: '17 décembre 2026', mail: 'le 16 décembre', champs: ['Date 1ère soirée CV / Date Présentiel'],
+  message: 'Date à vérifier : le site indique « 17 décembre 2026 », le mail indiquera le 16 décembre. Préviens Maylis.',
+})
+eq('webflow — présentiel concordant (début 16/12, présentiel 17/12)', wf({ numero: '26.003', date_debut: '2026-12-16', date_cv1: '2026-12-17', temps_lisible: '17 décembre 2026 - Rencontres Médéré Paris' }, PRES), null)
+eq("webflow — CV L'IA en santé 26.011 concordante", wf({ numero: '26.011', date_debut: '2026-11-02', date_cv1: '2026-11-02', date_cv2: '2026-11-04', temps_lisible: '2 et 4 novembre 2026' }, CV), null)
+eq('webflow — CV « 1 décembre » (sans « er ») concordante', wf({ numero: '26.013', date_debut: '2026-12-01', date_cv1: '2026-12-01', date_cv2: '2026-12-10', temps_lisible: '1 et 10 décembre 2026' }, CV), null)
+eq('webflow — CV sur deux mois concordante', wf({ numero: '26.026', date_debut: '2026-11-24', date_cv1: '2026-11-24', date_cv2: '2026-12-01', temps_lisible: '24 novembre et 1 décembre 2026' }, CV), null)
+eq('webflow — CV, 2ème soirée différente', wf({ numero: '26.011', date_debut: '2026-11-02', date_cv1: '2026-11-02', date_cv2: '2026-11-05', temps_lisible: '2 et 4 novembre 2026' }, CV), {
+  site: '2 et 4 novembre 2026', mail: 'les 2 et 5 novembre', champs: ['Date 2ème soirée CV'],
+  message: 'Date à vérifier : le site indique « 2 et 4 novembre 2026 », le mail indiquera les 2 et 5 novembre. Préviens Maylis.',
+})
+eq('webflow — CV, une seule soirée sur le site, deux dans la fiche', wf({ numero: '26.001', date_debut: '2026-10-28', date_cv1: '2026-10-28', date_cv2: '2026-11-04', temps_lisible: '28 octobre 2026' }, CV)?.champs, ['Date 2ème soirée CV'])
+eq('webflow — CV, autre année', wf({ numero: '26.010', date_debut: '2026-12-21', date_cv1: '2026-12-21', temps_lisible: '21 décembre 2027' }, CV)?.mail, 'le 21 décembre 2026')
+eq('webflow — e-learning « Septembre 2026 », début 7/09 : aucune alerte', wf({ numero: '26.010', date_debut: '2026-09-07', date_fin: '2027-06-15', temps_lisible: 'Septembre 2026' }, EL), null)
+eq('webflow — e-learning « Session 2026 » : aucune alerte', wf({ numero: '26.001', date_debut: '2026-02-01', date_fin: '2026-12-31', temps_lisible: 'Session 2026' }, EL), null)
+eq('webflow — e-learning « Août 2026 », début 1/08 : aucune alerte', wf({ numero: '26.007', date_debut: '2026-08-01', date_fin: '2027-01-15', temps_lisible: 'Août 2026' }, EL), null)
+eq('webflow — hybride « Septembre 2026 », début 1/09 : aucune alerte', wf({ numero: '26.021', date_debut: '2026-09-01', date_fin: '2026-12-22', date_cv1: '2026-12-22', temps_lisible: 'Septembre 2026' }, HYB), null)
+eq('webflow — e-learning, mois différent', wf({ numero: '26.011', date_debut: '2026-10-01', date_fin: '2027-04-15', temps_lisible: 'Septembre 2026' }, EL), {
+  site: 'Septembre 2026', mail: 'un début de session le 1er octobre 2026', champs: ['Date de début de session'],
+  message: 'Date à vérifier : le site indique « Septembre 2026 », le mail indiquera un début de session le 1er octobre 2026. Préviens Maylis.',
+})
+eq('webflow — texte vide ou sans date : aucune alerte', [wf({ numero: '1', date_debut: '2026-12-16', temps_lisible: '' }, PRES), wf({ numero: '1', date_debut: '2026-12-16', temps_lisible: 'Rencontres Médéré Paris' }, PRES)], [null, null])
+eq('webflow — fiche sans date : aucune alerte', wf({ numero: '1', temps_lisible: '17 décembre 2026' }, PRES), null)
 
 console.log(failures ? `\n${failures} écart(s).` : '\nTous les tests passent.')
 process.exit(failures ? 1 : 0)
